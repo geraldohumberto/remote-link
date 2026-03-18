@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::info;
 use crate::protocol::*;
 
@@ -27,22 +28,24 @@ pub enum Evt {
 }
 
 pub async fn connect(
-    host: String, port: u16, password: String,
+    host: String,
+    port: u16,
+    password: String,
+    relay: Option<(String, u16)>,   // Some((relay_host, relay_port))
     mut cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
-    let addr = format!("{}:{}", host, port);
-    let stream = match TcpStream::connect(&addr).await {
-        Ok(s)  => s,
-        Err(e) => {
-            let _ = evt_tx.send(Evt::Error { reason: format!("Nao conectou em {}: {}", addr, e) }).await;
-            return;
-        }
+    // Tenta conexão direta primeiro, depois via relay se configurado
+    let stream = match try_connect(&host, port, &relay, &evt_tx).await {
+        Some(s) => s,
+        None    => return,
     };
+
     stream.set_nodelay(true).ok();
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
+    // Auth
     if send_msg(&writer, &Message::Auth { password }).await.is_err() { return; }
 
     match recv_msg(&mut reader).await {
@@ -60,6 +63,7 @@ pub async fn connect(
         }
     }
 
+    // Recv task
     let tx2 = evt_tx.clone();
     let recv_task = tokio::spawn(async move {
         loop {
@@ -91,11 +95,12 @@ pub async fn connect(
         let _ = tx2.send(Evt::Disconnected).await;
     });
 
+    // Command loop
     loop {
         match cmd_rx.recv().await {
-            Some(Cmd::Input(ev))           => { let _ = send_msg(&writer, &Message::Input(ev)).await; }
-            Some(Cmd::Clipboard(text))     => { let _ = send_msg(&writer, &Message::Clipboard { text }).await; }
-            Some(Cmd::FileList)            => { let _ = send_msg(&writer, &Message::FileListReq { folder: None }).await; }
+            Some(Cmd::Input(ev))       => { let _ = send_msg(&writer, &Message::Input(ev)).await; }
+            Some(Cmd::Clipboard(text)) => { let _ = send_msg(&writer, &Message::Clipboard { text }).await; }
+            Some(Cmd::FileList)        => { let _ = send_msg(&writer, &Message::FileListReq { folder: None }).await; }
             Some(Cmd::FileDownload { filename, path }) => {
                 let _ = send_msg(&writer, &Message::FileDownload { filename, path }).await;
             }
@@ -120,4 +125,85 @@ pub async fn connect(
         }
     }
     recv_task.abort();
+}
+
+/// Tenta conexão direta, e se falhar e relay estiver configurado, tenta via relay
+async fn try_connect(
+    host: &str,
+    port: u16,
+    relay: &Option<(String, u16)>,
+    evt_tx: &mpsc::Sender<Evt>,
+) -> Option<TcpStream> {
+    let direct_addr = format!("{}:{}", host, port);
+
+    // Tenta direto primeiro (timeout 5s)
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        TcpStream::connect(&direct_addr),
+    ).await {
+        Ok(Ok(stream)) => {
+            info!("Conectado diretamente em {}", direct_addr);
+            return Some(stream);
+        }
+        _ => {
+            info!("Conexao direta falhou em {}", direct_addr);
+        }
+    }
+
+    // Se tem relay configurado, tenta via relay
+    if let Some((relay_host, relay_port)) = relay {
+        let relay_addr = format!("{}:{}", relay_host, relay_port);
+        info!("Tentando via relay: {}", relay_addr);
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connect_via_relay(&relay_addr, host, port),
+        ).await {
+            Ok(Ok(stream)) => {
+                info!("Conectado via relay");
+                return Some(stream);
+            }
+            Ok(Err(e)) => {
+                let _ = evt_tx.send(Evt::Error {
+                    reason: format!("Conexao direta e relay falharam. Relay: {}", e),
+                }).await;
+            }
+            Err(_) => {
+                let _ = evt_tx.send(Evt::Error {
+                    reason: "Timeout ao conectar via relay.".into(),
+                }).await;
+            }
+        }
+    } else {
+        let _ = evt_tx.send(Evt::Error {
+            reason: format!("Nao foi possivel conectar em {}. Verifique o IP e a porta, ou configure um relay.", direct_addr),
+        }).await;
+    }
+
+    None
+}
+
+/// Conecta ao relay e pede pra ser emparelhado com o peer destino
+async fn connect_via_relay(relay_addr: &str, target_host: &str, target_port: u16) -> anyhow::Result<TcpStream> {
+    let mut stream = TcpStream::connect(relay_addr).await?;
+    stream.set_nodelay(true)?;
+
+    // Envia pedido de conexão com ID = "host:porta" do destino
+    let peer_id = format!("{}:{}", target_host, target_port);
+    let msg = serde_json::json!({"action": "connect", "id": peer_id}).to_string() + "\n";
+    stream.write_all(msg.as_bytes()).await?;
+
+    // Lê resposta do relay
+    let (reader, writer) = stream.into_split();
+    let mut buf = BufReader::new(reader);
+    let mut line = String::new();
+    buf.read_line(&mut line).await?;
+
+    let resp: serde_json::Value = serde_json::from_str(line.trim())?;
+    if resp["ok"].as_bool() != Some(true) {
+        anyhow::bail!("{}", resp["reason"].as_str().unwrap_or("Relay recusou conexao"));
+    }
+
+    // Reconstrói o stream
+    Ok(buf.into_inner().reunite(writer)?)
 }

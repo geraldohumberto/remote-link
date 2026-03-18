@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_PEER_PORT:  u16  = 7890;
+pub const DEFAULT_RELAY_PORT: u16  = 7891;
 pub const DEFAULT_PASSWORD:   &str = "remotelink123";
 pub const CHUNK_SIZE:         usize = 65_536;
 pub const JPEG_QUALITY:       u8   = 55;
