@@ -22,13 +22,13 @@ pub async fn run(config: Arc<Config>) {
             Ok((stream, peer)) => {
                 info!("Conexao de {}", peer);
                 let cfg = config.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle(stream, cfg).await {
-                        warn!("Sessao encerrada: {}", e);
-                    }
-                });
+                // spawn_blocking não é necessário aqui pois handle() usa spawn interno
+                tokio::spawn(handle(stream, cfg));
             }
-            Err(e) => { warn!("Erro accept: {}", e); tokio::time::sleep(Duration::from_secs(1)).await; }
+            Err(e) => {
+                warn!("Erro accept: {}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
     }
 }
@@ -38,12 +38,19 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
+    // Auth
     match recv_msg(&mut reader).await? {
         Message::Auth { password } if password == config.password => {
-            let cap = Capturer::new()?;
-            let (sw, sh) = cap.size();
+            // Captura info da tela em spawn_blocking (xcap não é Send no Windows)
+            let (sw, sh) = tokio::task::spawn_blocking(|| {
+                Capturer::new()
+                    .map(|c| c.size())
+                    .unwrap_or((1920, 1080))
+            }).await?;
+
             send_msg(&writer, &Message::AuthOk {
-                screen_w: sw, screen_h: sh,
+                screen_w: sw,
+                screen_h: sh,
                 platform: std::env::consts::OS.to_string(),
                 peer_id:  Uuid::new_v4().to_string(),
             }).await?;
@@ -55,29 +62,58 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         _ => anyhow::bail!("Protocolo inesperado na auth"),
     }
 
-    let w2   = writer.clone();
-    let cfg2 = config.clone();
-    let cap  = Arc::new(Mutex::new(Capturer::new()?));
-    let cap2 = cap.clone();
-    let frame_task = tokio::spawn(async move {
-        let mut tick = interval(Duration::from_millis(1000 / cfg2.fps));
+    // Canal para receber frames do thread de captura
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let quality = config.jpeg_quality;
+    let fps     = config.fps;
+
+    // Thread dedicado pra captura (resolve o problema Send no Windows)
+    let capture_thread = std::thread::spawn(move || {
+        let mut cap = match Capturer::new() {
+            Ok(c)  => c,
+            Err(e) => { warn!("Capturer falhou: {}", e); return; }
+        };
+        let interval_ms = std::time::Duration::from_millis(1000 / fps);
         loop {
-            tick.tick().await;
-            let result = {
-                let mut c = cap2.lock().await;
-                c.capture_jpeg(cfg2.jpeg_quality)
-            };
-            if let Ok(jpeg) = result {
-                let (w, h) = { cap2.lock().await.size() };
-                let size = jpeg.len() as u32;
-                if send_msg_bytes(&w2, &Message::FrameInfo { width: w, height: h, size }, &jpeg).await.is_err() {
-                    break;
+            let t0 = std::time::Instant::now();
+            match cap.capture_jpeg(quality) {
+                Ok(jpeg) => {
+                    if frame_tx.blocking_send(jpeg).is_err() {
+                        break; // receiver dropped — sessao encerrada
+                    }
                 }
+                Err(e) => { warn!("Captura falhou: {}", e); }
+            }
+            let elapsed = t0.elapsed();
+            if elapsed < interval_ms {
+                std::thread::sleep(interval_ms - elapsed);
             }
         }
     });
 
-    let mut inj = Injector::new()?;
+    // Task que pega frames do channel e envia pro cliente
+    let w2 = writer.clone();
+    let frame_task = tokio::spawn(async move {
+        while let Some(jpeg) = frame_rx.recv().await {
+            let size = jpeg.len() as u32;
+            // Não temos w/h atualizados aqui — usamos o tamanho do frame JPEG
+            // (o cliente já sabe o tamanho original da tela via AuthOk)
+            if send_msg_bytes(
+                &w2,
+                &Message::FrameInfo { width: 0, height: 0, size },
+                &jpeg,
+            ).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Input / controle loop
+    let mut inj = match Injector::new() {
+        Ok(i)  => i,
+        Err(e) => { warn!("Injector falhou: {}", e); anyhow::bail!("Injector: {}", e); }
+    };
+
     loop {
         match recv_msg(&mut reader).await? {
             Message::Input(ev) => { let _ = inj.inject(&ev); }
@@ -103,7 +139,10 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
             _ => {}
         }
     }
+
     frame_task.abort();
+    // capture_thread vai terminar sozinho quando frame_tx for dropado
+    drop(capture_thread);
     Ok(())
 }
 
@@ -128,7 +167,9 @@ fn file_list(folder: &PathBuf) -> Message {
 
 async fn do_download(w: &Writer, path: &PathBuf, filename: &str) -> anyhow::Result<()> {
     if !path.is_file() {
-        return send_msg(w, &Message::FileError { reason: format!("Nao encontrado: {}", filename) }).await;
+        return send_msg(w, &Message::FileError {
+            reason: format!("Nao encontrado: {}", filename),
+        }).await;
     }
     let data  = tokio::fs::read(path).await?;
     let total = data.len() as u64;
