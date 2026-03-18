@@ -1,0 +1,24 @@
+[package]
+name        = "remote-link-relay"
+version     = "0.1.0"
+edition     = "2021"
+description = "RemoteLink Relay — servidor de ponte TCP"
+
+[[bin]]
+name = "remote-link-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio             = { version = "1", features = ["full"] }
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+uuid              = { version = "1", features = ["v4"] }
+dirs              = "5"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true

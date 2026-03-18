@@ -1,0 +1,67 @@
+[package]
+name        = "remote-link"
+version     = "0.1.0"
+edition     = "2021"
+description = "Acesso remoto peer-to-peer — self-contained, sem dependências"
+
+[[bin]]
+name = "remote-link"
+path = "src/main.rs"
+
+[dependencies]
+# UI self-contained (OpenGL/DirectX — zero dependência do sistema)
+eframe      = { version = "0.27", features = ["persistence"] }
+egui        = "0.27"
+egui_extras = "0.27"
+
+# Tray icon nativo
+tray-icon   = "0.14"
+
+# Async runtime
+tokio       = { version = "1", features = ["full"] }
+
+# Captura de tela cross-platform
+xcap        = "0.2"
+
+# Injeção de mouse e teclado
+enigo       = "0.2"
+
+# Imagem / JPEG
+image       = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Serialização
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# Config
+dirs        = "5"
+
+# Clipboard
+arboard     = "3"
+
+# UUID
+uuid        = { version = "1", features = ["v4"] }
+
+# Logging
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# Base64 (frames JPEG → UI)
+base64      = "0.22"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true
+
+# Windows: sem janela de console preta
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[[target.'cfg(windows)'.bin]]
+name = "remote-link"
+
+[package.metadata.bundle]
+name       = "RemoteLink"
+identifier = "br.remotelink.peer"
