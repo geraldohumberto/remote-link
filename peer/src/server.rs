@@ -1,4 +1,3 @@
-// src/server.rs
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -16,16 +15,16 @@ pub async fn run(config: Arc<Config>) {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l)  => { info!("Servidor escutando em {}", addr); l }
-        Err(e) => { warn!("Não foi possível bindar {}: {}", addr, e); return; }
+        Err(e) => { warn!("Nao foi possivel bindar {}: {}", addr, e); return; }
     };
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                info!("Conexão de {}", peer);
+                info!("Conexao de {}", peer);
                 let cfg = config.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle(stream, cfg).await {
-                        warn!("Sessão encerrada: {}", e);
+                        warn!("Sessao encerrada: {}", e);
                     }
                 });
             }
@@ -39,7 +38,6 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
-    // Auth
     match recv_msg(&mut reader).await? {
         Message::Auth { password } if password == config.password => {
             let cap = Capturer::new()?;
@@ -57,8 +55,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         _ => anyhow::bail!("Protocolo inesperado na auth"),
     }
 
-    // Frame sender
-    let w2  = writer.clone();
+    let w2   = writer.clone();
     let cfg2 = config.clone();
     let cap  = Arc::new(Mutex::new(Capturer::new()?));
     let cap2 = cap.clone();
@@ -66,17 +63,20 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         let mut tick = interval(Duration::from_millis(1000 / cfg2.fps));
         loop {
             tick.tick().await;
-            let jpeg = { let mut c = cap2.lock().await; c.capture_jpeg(cfg2.jpeg_quality).ok() };
-            if let Some(jpeg) = jpeg {
+            let result = {
+                let mut c = cap2.lock().await;
+                c.capture_jpeg(cfg2.jpeg_quality)
+            };
+            if let Ok(jpeg) = result {
                 let (w, h) = { cap2.lock().await.size() };
-                if send_msg_bytes(&w2, &Message::FrameInfo { width: w, height: h, size: jpeg.len() as u32 }, &jpeg).await.is_err() {
+                let size = jpeg.len() as u32;
+                if send_msg_bytes(&w2, &Message::FrameInfo { width: w, height: h, size }, &jpeg).await.is_err() {
                     break;
                 }
             }
         }
     });
 
-    // Input loop
     let mut inj = Injector::new()?;
     loop {
         match recv_msg(&mut reader).await? {
@@ -111,7 +111,7 @@ fn file_list(folder: &PathBuf) -> Message {
     let mut items = Vec::new();
     if let Ok(rd) = std::fs::read_dir(folder) {
         for e in rd.flatten() {
-            let meta  = e.metadata();
+            let meta   = e.metadata();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size   = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             items.push(FileItem {
@@ -128,7 +128,7 @@ fn file_list(folder: &PathBuf) -> Message {
 
 async fn do_download(w: &Writer, path: &PathBuf, filename: &str) -> anyhow::Result<()> {
     if !path.is_file() {
-        return send_msg(w, &Message::FileError { reason: format!("Não encontrado: {}", filename) }).await;
+        return send_msg(w, &Message::FileError { reason: format!("Nao encontrado: {}", filename) }).await;
     }
     let data  = tokio::fs::read(path).await?;
     let total = data.len() as u64;
@@ -138,13 +138,16 @@ async fn do_download(w: &Writer, path: &PathBuf, filename: &str) -> anyhow::Resu
     send_msg(w, &Message::FileDone { filename: filename.to_string(), bytes: total }).await
 }
 
-async fn do_upload(w: &Writer, r: &mut Reader, dest: &PathBuf, filename: &str, filesize: u64) -> anyhow::Result<()> {
+async fn do_upload(
+    w: &Writer, r: &mut Reader,
+    dest: &PathBuf, filename: &str, filesize: u64,
+) -> anyhow::Result<()> {
     let mut data = Vec::with_capacity(filesize as usize);
     let mut received = 0u64;
     loop {
         match recv_msg(r).await? {
             Message::FileChunk { size } => {
-                let chunk = recv_bytes(r, size as usize).await?;
+                let chunk: Vec<u8> = recv_bytes(r, size as usize).await?;
                 data.extend_from_slice(&chunk);
                 received += size as u64;
             }

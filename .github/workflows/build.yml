@@ -3,18 +3,17 @@ name: Build — RemoteLink
 on:
   push:
     tags:
-      - 'v*'        # dispara quando você criar uma tag tipo v0.1.0
-  workflow_dispatch:  # permite rodar manualmente pela aba Actions
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
-  # ── Linux: peer + relay ──────────────────────────────────────────────────
   build-linux:
     name: Linux (x86_64)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Dependências do sistema
+      - name: Dependencias do sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -42,7 +41,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: linux-cargo-${{ hashFiles('peer/Cargo.lock', 'relay/Cargo.lock') }}
+          key: linux-cargo-${{ hashFiles('peer/Cargo.toml', 'relay/Cargo.toml') }}
 
       - name: Build peer (Linux)
         working-directory: peer
@@ -55,7 +54,7 @@ jobs:
       - name: Preparar artefatos Linux
         run: |
           mkdir -p dist
-          cp peer/target/release/remote-link   dist/remote-link-linux
+          cp peer/target/release/remote-link        dist/remote-link-linux
           cp relay/target/release/remote-link-relay dist/remote-link-relay-linux
           chmod +x dist/remote-link-linux dist/remote-link-relay-linux
 
@@ -65,7 +64,6 @@ jobs:
           name: linux-binaries
           path: dist/
 
-  # ── Windows: peer + relay ─────────────────────────────────────────────────
   build-windows:
     name: Windows (x86_64)
     runs-on: windows-latest
@@ -83,7 +81,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: windows-cargo-${{ hashFiles('peer/Cargo.lock', 'relay/Cargo.lock') }}
+          key: windows-cargo-${{ hashFiles('peer/Cargo.toml', 'relay/Cargo.toml') }}
 
       - name: Build peer (Windows)
         working-directory: peer
@@ -97,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item peer\target\release\remote-link.exe   dist\remote-link-windows.exe
+          Copy-Item peer\target\release\remote-link.exe        dist\remote-link-windows.exe
           Copy-Item relay\target\release\remote-link-relay.exe dist\remote-link-relay-windows.exe
 
       - name: Upload artefatos Windows
@@ -106,7 +104,6 @@ jobs:
           name: windows-binaries
           path: dist/
 
-  # ── Release: junta tudo e publica ─────────────────────────────────────────
   release:
     name: Publicar Release
     needs: [build-linux, build-windows]
@@ -125,10 +122,7 @@ jobs:
           name: windows-binaries
           path: dist/
 
-      - name: Listar arquivos gerados
-        run: ls -lh dist/
-
-      - name: Criar Release no GitHub
+      - name: Criar Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -139,25 +133,14 @@ jobs:
           body: |
             ## RemoteLink ${{ github.ref_name }}
 
-            ### Download — escolha o arquivo certo para o seu sistema:
-
             | Arquivo | Sistema | Uso |
             |---|---|---|
             | `remote-link-linux` | Linux | Peer — cliente + host |
             | `remote-link-windows.exe` | Windows | Peer — cliente + host |
-            | `remote-link-relay-linux` | Linux | Servidor de ponte (opcional) |
-            | `remote-link-relay-windows.exe` | Windows | Servidor de ponte (opcional) |
+            | `remote-link-relay-linux` | Linux | Servidor de ponte |
+            | `remote-link-relay-windows.exe` | Windows | Servidor de ponte |
 
-            ### Como usar no Linux:
-            ```bash
-            chmod +x remote-link-linux
-            ./remote-link-linux
-            ```
-
-            ### Como usar no Windows:
-            Duplo clique em `remote-link-windows.exe`
-
-            ### Primeira execução:
-            O app pede para definir uma senha. Essa senha será usada por quem quiser se conectar ao seu PC.
+            **Linux:** `chmod +x remote-link-linux && ./remote-link-linux`
+            **Windows:** duplo clique em `remote-link-windows.exe`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

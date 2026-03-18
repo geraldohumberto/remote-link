@@ -1,4 +1,3 @@
-// src/config.rs
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use crate::protocol::{DEFAULT_PASSWORD, DEFAULT_PEER_PORT, FPS_TARGET, JPEG_QUALITY};
@@ -18,31 +17,21 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let shared = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("RemoteLink_Shared")
-            .to_string_lossy().to_string();
+        let shared = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+            .join("RemoteLink_Shared").to_string_lossy().to_string();
         Self {
-            password:            DEFAULT_PASSWORD.to_string(),
-            port:                DEFAULT_PEER_PORT,
-            jpeg_quality:        JPEG_QUALITY,
-            fps:                 FPS_TARGET,
-            allow_file_transfer: true,
-            shared_folder:       shared,
-            last_host:           String::new(),
-            last_port:           DEFAULT_PEER_PORT,
-            first_run:           true,
+            password: DEFAULT_PASSWORD.to_string(), port: DEFAULT_PEER_PORT,
+            jpeg_quality: JPEG_QUALITY, fps: FPS_TARGET,
+            allow_file_transfer: true, shared_folder: shared,
+            last_host: String::new(), last_port: DEFAULT_PEER_PORT, first_run: true,
         }
     }
 }
 
 impl Config {
     fn path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".remote-link.json")
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".remote-link.json")
     }
-
     pub fn load() -> Self {
         let p = Self::path();
         if p.exists() {
@@ -55,17 +44,10 @@ impl Config {
         }
         let c = Config::default();
         let _ = std::fs::create_dir_all(&c.shared_folder);
-        c.save();
-        c
+        c.save(); c
     }
-
     pub fn save(&self) {
-        if let Ok(j) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(), j);
-        }
+        if let Ok(j) = serde_json::to_string_pretty(self) { let _ = std::fs::write(Self::path(), j); }
     }
-
-    pub fn shared_path(&self) -> PathBuf {
-        PathBuf::from(&self.shared_folder)
-    }
+    pub fn shared_path(&self) -> PathBuf { PathBuf::from(&self.shared_folder) }
 }

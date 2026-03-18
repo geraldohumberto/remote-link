@@ -1,8 +1,7 @@
-// src/client.rs
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::info;
 use crate::protocol::*;
 
 #[derive(Debug)]
@@ -20,7 +19,6 @@ pub enum Evt {
     Connected   { screen_w: u32, screen_h: u32, platform: String },
     Frame       { jpeg: Vec<u8> },
     FileList    { folder: String, items: Vec<FileItem> },
-    FileProgress{ filename: String, bytes: u64, total: u64 },
     FileDone    { filename: String, bytes: u64 },
     FileError   { reason: String },
     Clipboard   { text: String },
@@ -37,7 +35,7 @@ pub async fn connect(
     let stream = match TcpStream::connect(&addr).await {
         Ok(s)  => s,
         Err(e) => {
-            let _ = evt_tx.send(Evt::Error { reason: format!("Não conectou em {}: {}", addr, e) }).await;
+            let _ = evt_tx.send(Evt::Error { reason: format!("Nao conectou em {}: {}", addr, e) }).await;
             return;
         }
     };
@@ -45,8 +43,8 @@ pub async fn connect(
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
-    // Auth
     if send_msg(&writer, &Message::Auth { password }).await.is_err() { return; }
+
     match recv_msg(&mut reader).await {
         Ok(Message::AuthOk { screen_w, screen_h, platform, .. }) => {
             info!("Autenticado: {}x{} {}", screen_w, screen_h, platform);
@@ -56,10 +54,12 @@ pub async fn connect(
             let _ = evt_tx.send(Evt::Error { reason: format!("Senha errada: {}", reason) }).await;
             return;
         }
-        _ => { let _ = evt_tx.send(Evt::Error { reason: "Protocolo inesperado".into() }).await; return; }
+        _ => {
+            let _ = evt_tx.send(Evt::Error { reason: "Protocolo inesperado".into() }).await;
+            return;
+        }
     }
 
-    // Recv task
     let tx2 = evt_tx.clone();
     let recv_task = tokio::spawn(async move {
         loop {
@@ -91,12 +91,11 @@ pub async fn connect(
         let _ = tx2.send(Evt::Disconnected).await;
     });
 
-    // Command loop
     loop {
         match cmd_rx.recv().await {
-            Some(Cmd::Input(ev)) => { let _ = send_msg(&writer, &Message::Input(ev)).await; }
-            Some(Cmd::Clipboard(text)) => { let _ = send_msg(&writer, &Message::Clipboard { text }).await; }
-            Some(Cmd::FileList) => { let _ = send_msg(&writer, &Message::FileListReq { folder: None }).await; }
+            Some(Cmd::Input(ev))           => { let _ = send_msg(&writer, &Message::Input(ev)).await; }
+            Some(Cmd::Clipboard(text))     => { let _ = send_msg(&writer, &Message::Clipboard { text }).await; }
+            Some(Cmd::FileList)            => { let _ = send_msg(&writer, &Message::FileListReq { folder: None }).await; }
             Some(Cmd::FileDownload { filename, path }) => {
                 let _ = send_msg(&writer, &Message::FileDownload { filename, path }).await;
             }
@@ -108,7 +107,8 @@ pub async fn connect(
                     let filesize = data.len() as u64;
                     let _ = send_msg(&writer, &Message::FileUpload { filename: filename.clone(), filesize }).await;
                     for chunk in data.chunks(CHUNK_SIZE) {
-                        let _ = send_msg_bytes(&writer, &Message::FileChunk { size: chunk.len() as u32 }, chunk).await;
+                        let chunk_data: Vec<u8> = chunk.to_vec();
+                        let _ = send_msg_bytes(&writer, &Message::FileChunk { size: chunk_data.len() as u32 }, &chunk_data).await;
                     }
                     let _ = send_msg(&writer, &Message::FileDone { filename, bytes: filesize }).await;
                 }

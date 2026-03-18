@@ -1,7 +1,6 @@
-<<<<<<< HEAD
-# 🔗 RemoteLink
+# RemoteLink
 
-Acesso remoto peer-to-peer — self-contained, sem dependências, Windows e Linux.
+Acesso remoto peer-to-peer — self-contained, sem dependencias, Windows e Linux.
 
 ## Download
 
@@ -24,21 +23,8 @@ chmod +x remote-link-linux
 
 **Windows:** duplo clique em `remote-link-windows.exe`
 
-Na primeira execução o app pede para definir uma senha. Essa senha é usada por quem for se conectar ao seu PC.
-
-## Funcionalidades
-
-- ✅ Ícone na bandeja do sistema — não ocupa janela
-- ✅ Cliente e servidor ao mesmo tempo
-- ✅ Transferência de arquivos bidirecional
-- ✅ Senha configurável
-- ✅ Self-contained — sem instalar nada
-- ✅ Windows ↔ Linux, físico ou VM
+Na primeira execucao o app pede para definir uma senha.
 
 ## Tecnologia
 
 Rust · egui · tokio · xcap · enigo
-=======
-# remote-link
-Acesso remoto peer-to-peer — self-contained, sem dependências, Windows e Linux
->>>>>>> 00c00a79e1654da4e0666361d0e0358f4951679e
