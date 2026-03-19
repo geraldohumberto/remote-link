@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 use futures_util::{SinkExt, StreamExt};
 use tracing::info;
@@ -37,21 +37,21 @@ pub async fn connect(
     mut cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
-    // Detecta relay WebSocket (Cloudflare Workers)
-    let is_ws_relay = relay.as_ref().map(|(h, _)| {
+    // Detecta relay WebSocket
+    let is_ws = relay.as_ref().map(|(h, _)| {
         let h = h.trim().to_lowercase();
         h.starts_with("https://") || h.starts_with("http://") ||
         h.starts_with("wss://")   || h.starts_with("ws://")   ||
-        h.contains(".workers.dev")
+        h.contains(".workers.dev") || h.contains(".pages.dev")
     }).unwrap_or(false);
 
-    if is_ws_relay {
+    if is_ws {
         let relay_host = relay.unwrap().0;
         connect_ws(relay_host, host, port, password, cmd_rx, evt_tx).await;
         return;
     }
 
-    // Tenta conexão TCP direta
+    // Tenta TCP direto
     let direct_addr = format!("{}:{}", host, port);
     let stream = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -59,20 +59,19 @@ pub async fn connect(
     ).await {
         Ok(Ok(s)) => { info!("Direto: {}", direct_addr); s }
         _ => {
-            // Tenta relay TCP
             if let Some((rhost, rport)) = relay {
                 match tcp_relay(&rhost, rport, &host, port).await {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = evt_tx.send(Evt::Error {
-                            reason: format!("Falhou direto e relay: {}", e),
+                            reason: format!("Falhou direto e relay TCP: {}", e),
                         }).await;
                         return;
                     }
                 }
             } else {
                 let _ = evt_tx.send(Evt::Error {
-                    reason: format!("Nao conectou em {}. Configure relay para internet.", direct_addr),
+                    reason: format!("Nao conectou em {}. Configure o relay para conexoes pela internet.", direct_addr),
                 }).await;
                 return;
             }
@@ -83,11 +82,11 @@ pub async fn connect(
     tcp_session(stream, password, cmd_rx, evt_tx).await;
 }
 
-// ── Sessão TCP ───────────────────────────────────────────────────────────
+// ── Sessão TCP direta ────────────────────────────────────────────────────
 async fn tcp_session(
     stream: TcpStream,
     password: String,
-    mut cmd_rx: mpsc::Receiver<Cmd>,
+    cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
     let (mut reader, writer_raw) = stream.into_split();
@@ -145,51 +144,62 @@ async fn tcp_session(
 }
 
 // ── Relay WebSocket (Cloudflare Workers) ─────────────────────────────────
-// Protocolo: cada mensagem RemoteLink vira um WsMsg::Binary
-// O Worker faz a ponte binária entre os dois peers
 async fn connect_ws(
     relay_host: String,
     target_host: String,
     target_port: u16,
     password: String,
-    mut cmd_rx: mpsc::Receiver<Cmd>,
+    cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
     let base = relay_host.trim().trim_end_matches('/')
         .replace("https://", "wss://")
         .replace("http://", "ws://");
+
+    // ID do peer destino = host:porta
     let peer_id = format!("{}:{}", target_host, target_port);
-    let url = format!("{}/?action=connect&id={}", base, urlencoding::encode(&peer_id));
+    let encoded_id = peer_id.replace(":", "%3A").replace(".", "%2E");
+    let url = format!("{}/?action=connect&id={}", base, encoded_id);
 
-    info!("WS relay: {}", url);
+    info!("Conectando via WS relay: {}", url);
 
+    // Tenta conectar ao relay com retry
     let ws = match tokio::time::timeout(
         std::time::Duration::from_secs(15),
         connect_async(&url),
     ).await {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
-            let _ = evt_tx.send(Evt::Error { reason: format!("WS relay falhou: {}", e) }).await;
+            let _ = evt_tx.send(Evt::Error {
+                reason: format!("Relay WebSocket falhou: {}", e),
+            }).await;
             return;
         }
         Err(_) => {
-            let _ = evt_tx.send(Evt::Error { reason: "Timeout no relay.".into() }).await;
+            let _ = evt_tx.send(Evt::Error { reason: "Timeout ao conectar no relay.".into() }).await;
             return;
         }
     };
 
-    let (mut ws_tx, mut ws_rx) = ws.split();
+    info!("WS conectado ao relay");
+    let (mut ws_write, mut ws_read) = ws.split();
 
     // Lê confirmação do relay
-    match ws_rx.next().await {
+    match ws_read.next().await {
         Some(Ok(WsMsg::Text(t))) => {
             let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
             if v["ok"].as_bool() != Some(true) {
                 let r = v["reason"].as_str().unwrap_or("Relay recusou").to_string();
-                let _ = evt_tx.send(Evt::Error { reason: format!("Relay: {}", r) }).await;
+                let _ = evt_tx.send(Evt::Error { reason: format!("Relay: {} — O servidor remoto precisa estar rodando e registrado.", r) }).await;
                 return;
             }
-            info!("Relay OK: {}", t);
+            info!("Relay confirmado: {}", t);
+        }
+        Some(Ok(WsMsg::Close(_))) => {
+            let _ = evt_tx.send(Evt::Error {
+                reason: "Relay fechou conexao. Verifique se o servidor remoto esta rodando.".into()
+            }).await;
+            return;
         }
         _ => {
             let _ = evt_tx.send(Evt::Error { reason: "Sem resposta do relay.".into() }).await;
@@ -197,15 +207,15 @@ async fn connect_ws(
         }
     }
 
-    // Canal de bytes de saída (app → relay)
+    // Canal de saída: app → WS
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
-    // Canal de bytes de entrada (relay → app)
-    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(256);
+    // Canal de entrada: WS → app (buffer acumulador)
+    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(512);
 
-    // Task: recebe do WS e manda pro canal interno
+    // Task: WS receber → canal interno
     let in_tx2 = in_tx.clone();
-    let ws_recv = tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
+    let ws_recv_task = tokio::spawn(async move {
+        while let Some(msg) = ws_read.next().await {
             match msg {
                 Ok(WsMsg::Binary(b)) => { if in_tx2.send(b).await.is_err() { break; } }
                 Ok(WsMsg::Close(_)) | Err(_) => break,
@@ -214,51 +224,50 @@ async fn connect_ws(
         }
     });
 
-    // Task: pega do canal interno e manda pro WS
-    let ws_send = tokio::spawn(async move {
+    // Task: canal interno → WS enviar
+    let ws_send_task = tokio::spawn(async move {
         while let Some(data) = out_rx.recv().await {
-            if ws_tx.send(WsMsg::Binary(data)).await.is_err() { break; }
+            if ws_write.send(WsMsg::Binary(data)).await.is_err() { break; }
         }
     });
 
-    // Autenticação — serializa a mensagem e manda pelo canal
-    let auth_bytes = build_msg_bytes(&Message::Auth { password });
-    if out_tx.send(auth_bytes).await.is_err() { return; }
+    // Autenticação — envia via WS
+    let auth_bytes = proto_encode(&Message::Auth { password });
+    if out_tx.send(auth_bytes).await.is_err() {
+        let _ = evt_tx.send(Evt::Error { reason: "Falha ao enviar auth".into() }).await;
+        return;
+    }
 
-    // Lê resposta de auth do canal
-    let auth_resp = tokio::time::timeout(
+    // Lê resposta de auth
+    match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        recv_from_channel(&mut in_rx),
-    ).await;
-
-    match auth_resp {
+        proto_decode_from_channel(&mut in_rx),
+    ).await {
         Ok(Ok(Message::AuthOk { screen_w, screen_h, platform, .. })) => {
             let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform }).await;
         }
         Ok(Ok(Message::AuthFail { reason })) => {
             let _ = evt_tx.send(Evt::Error { reason: format!("Senha errada: {}", reason) }).await;
-            ws_recv.abort(); ws_send.abort();
+            ws_recv_task.abort(); ws_send_task.abort();
             return;
         }
         _ => {
             let _ = evt_tx.send(Evt::Error { reason: "Auth via relay falhou.".into() }).await;
-            ws_recv.abort(); ws_send.abort();
+            ws_recv_task.abort(); ws_send_task.abort();
             return;
         }
     }
 
-    // Recv task — lê frames e eventos do relay
+    // Recv task — frames e eventos do relay
     let tx2 = evt_tx.clone();
     let recv_task = tokio::spawn(async move {
         loop {
-            match recv_from_channel(&mut in_rx).await {
+            match proto_decode_from_channel(&mut in_rx).await {
                 Ok(Message::FrameInfo { size, .. }) => {
-                    // Frame: próxima mensagem é o JPEG
-                    if let Ok(msg2) = recv_from_channel(&mut in_rx).await {
-                        // Frame bytes chegam como Raw
-                        if let Message::RawBytes(jpeg) = msg2 {
-                            let _ = tx2.send(Evt::Frame { jpeg }).await;
-                        }
+                    // Lê bytes do frame do próximo chunk
+                    match read_raw_from_channel(&mut in_rx, size as usize).await {
+                        Ok(jpeg) => { let _ = tx2.send(Evt::Frame { jpeg }).await; }
+                        Err(_)   => break,
                     }
                 }
                 Ok(Message::FileListRes { folder, items }) => {
@@ -280,20 +289,21 @@ async fn connect_ws(
         let _ = tx2.send(Evt::Disconnected).await;
     });
 
-    // Cmd loop — envia comandos pelo relay
+    // Cmd loop — envia comandos via WS
+    ws_cmd_loop(cmd_rx, out_tx).await;
+    recv_task.abort();
+    ws_recv_task.abort();
+    ws_send_task.abort();
+}
+
+async fn ws_cmd_loop(mut cmd_rx: mpsc::Receiver<Cmd>, out_tx: mpsc::Sender<Vec<u8>>) {
     loop {
         match cmd_rx.recv().await {
-            Some(Cmd::Input(ev)) => {
-                let _ = out_tx.send(build_msg_bytes(&Message::Input(ev))).await;
-            }
-            Some(Cmd::Clipboard(text)) => {
-                let _ = out_tx.send(build_msg_bytes(&Message::Clipboard { text })).await;
-            }
-            Some(Cmd::FileList) => {
-                let _ = out_tx.send(build_msg_bytes(&Message::FileListReq { folder: None })).await;
-            }
+            Some(Cmd::Input(ev))       => { let _ = out_tx.send(proto_encode(&Message::Input(ev))).await; }
+            Some(Cmd::Clipboard(text)) => { let _ = out_tx.send(proto_encode(&Message::Clipboard { text })).await; }
+            Some(Cmd::FileList)        => { let _ = out_tx.send(proto_encode(&Message::FileListReq { folder: None })).await; }
             Some(Cmd::FileDownload { filename, path }) => {
-                let _ = out_tx.send(build_msg_bytes(&Message::FileDownload { filename, path })).await;
+                let _ = out_tx.send(proto_encode(&Message::FileDownload { filename, path })).await;
             }
             Some(Cmd::FileUpload { src }) => {
                 if let Ok(data) = tokio::fs::read(&src).await {
@@ -301,23 +311,21 @@ async fn connect_ws(
                         .file_name().unwrap_or_default()
                         .to_string_lossy().to_string();
                     let filesize = data.len() as u64;
-                    let _ = out_tx.send(build_msg_bytes(&Message::FileUpload { filename: filename.clone(), filesize })).await;
+                    let _ = out_tx.send(proto_encode(&Message::FileUpload { filename: filename.clone(), filesize })).await;
                     for chunk in data.chunks(CHUNK_SIZE) {
-                        let _ = out_tx.send(build_msg_bytes_with_data(&Message::FileChunk { size: chunk.len() as u32 }, chunk)).await;
+                        let mut msg = proto_encode(&Message::FileChunk { size: chunk.len() as u32 });
+                        msg.extend_from_slice(chunk);
+                        let _ = out_tx.send(msg).await;
                     }
-                    let _ = out_tx.send(build_msg_bytes(&Message::FileDone { filename, bytes: filesize })).await;
+                    let _ = out_tx.send(proto_encode(&Message::FileDone { filename, bytes: filesize })).await;
                 }
             }
             Some(Cmd::Disconnect) | None => {
-                let _ = out_tx.send(build_msg_bytes(&Message::Disconnect)).await;
+                let _ = out_tx.send(proto_encode(&Message::Disconnect)).await;
                 break;
             }
         }
     }
-
-    recv_task.abort();
-    ws_recv.abort();
-    ws_send.abort();
 }
 
 // ── Relay TCP simples ────────────────────────────────────────────────────
@@ -342,40 +350,41 @@ async fn tcp_relay(
     Ok(buf.into_inner().reunite(writer)?)
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-fn build_msg_bytes(msg: &Message) -> Vec<u8> {
+// ── Helpers de protocolo ─────────────────────────────────────────────────
+fn proto_encode(msg: &Message) -> Vec<u8> {
     let json = serde_json::to_vec(msg).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
+    let len  = (json.len() as u32).to_be_bytes();
     let mut out = Vec::with_capacity(4 + json.len());
     out.extend_from_slice(&len);
     out.extend_from_slice(&json);
     out
 }
 
-fn build_msg_bytes_with_data(msg: &Message, data: &[u8]) -> Vec<u8> {
-    let json = serde_json::to_vec(msg).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut out = Vec::with_capacity(4 + json.len() + data.len());
-    out.extend_from_slice(&len);
-    out.extend_from_slice(&json);
-    out.extend_from_slice(data);
-    out
-}
-
-async fn recv_from_channel(rx: &mut mpsc::Receiver<Vec<u8>>) -> anyhow::Result<Message> {
-    // Acumula chunks até ter uma mensagem completa
+async fn proto_decode_from_channel(rx: &mut mpsc::Receiver<Vec<u8>>) -> anyhow::Result<Message> {
     let mut buf: Vec<u8> = Vec::new();
     loop {
         if buf.len() >= 4 {
-            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            let len = u32::from_be_bytes([buf[0],buf[1],buf[2],buf[3]]) as usize;
             if buf.len() >= 4 + len {
                 let msg: Message = serde_json::from_slice(&buf[4..4+len])?;
-                // Remove bytes consumidos
                 buf.drain(..4+len);
                 return Ok(msg);
             }
         }
-        let chunk = rx.recv().await.ok_or_else(|| anyhow::anyhow!("channel fechado"))?;
+        let chunk = rx.recv().await.ok_or_else(|| anyhow::anyhow!("canal fechado"))?;
+        buf.extend_from_slice(&chunk);
+    }
+}
+
+async fn read_raw_from_channel(rx: &mut mpsc::Receiver<Vec<u8>>, n: usize) -> anyhow::Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        if buf.len() >= n {
+            let out = buf[..n].to_vec();
+            buf.drain(..n);
+            return Ok(out);
+        }
+        let chunk = rx.recv().await.ok_or_else(|| anyhow::anyhow!("canal fechado"))?;
         buf.extend_from_slice(&chunk);
     }
 }

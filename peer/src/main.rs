@@ -66,7 +66,6 @@ struct App {
     cfg_saved:     bool,
     // info
     local_ip:      String,
-    tailscale_ip:  Option<String>,
 }
 
 impl App {
@@ -92,7 +91,6 @@ impl App {
         let relay_host  = config.relay_host.clone();
         let relay_port  = config.relay_port.to_string();
         let local_ip    = get_local_ip();
-        let tailscale_ip = get_tailscale_ip();
         let rt          = Arc::new(Runtime::new().expect("tokio runtime"));
 
         {
@@ -114,7 +112,7 @@ impl App {
             file_selected: None, file_status: String::new(),
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
-            local_ip, tailscale_ip,
+            local_ip,
         }
     }
 
@@ -297,25 +295,6 @@ impl App {
                     ui.label(RichText::new(&self.local_ip).size(11.0).color(Color32::from_rgb(0,212,255)));
                     if ui.small_button("copiar").clicked() { ctx.output_mut(|o| o.copied_text = self.local_ip.clone()); }
                 });
-
-                // IP Tailscale (se disponível)
-                if let Some(ts_ip) = &self.tailscale_ip.clone() {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Tailscale:").size(11.0).color(Color32::GRAY));
-                        ui.label(RichText::new(ts_ip).size(11.0).color(Color32::from_rgb(100,220,130)));
-                        if ui.small_button("copiar").clicked() { ctx.output_mut(|o| o.copied_text = ts_ip.clone()); }
-                    });
-                } else {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Tailscale:").size(11.0).color(Color32::GRAY));
-                        ui.label(RichText::new("nao instalado").size(11.0).color(Color32::DARK_GRAY));
-                        if ui.small_button("instalar").clicked() {
-                            open_url("https://tailscale.com/download");
-                        }
-                    });
-                }
             });
 
             ui.add_space(14.0);
@@ -596,41 +575,6 @@ fn get_local_ip() -> String {
         .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".into())
-}
-
-fn get_tailscale_ip() -> Option<String> {
-    // Tailscale usa a faixa 100.64.0.0/10
-    use std::net::UdpSocket;
-    // Tenta pegar todos os IPs das interfaces e filtrar o da faixa Tailscale
-    // Abordagem: tenta conectar em um IP Tailscale fictício e ver qual interface é usada
-    // Alternativa mais simples: ler as interfaces de rede
-    #[cfg(target_os = "windows")]
-    {
-        // No Windows, executa `tailscale ip` via comando
-        if let Ok(out) = std::process::Command::new("tailscale").arg("ip").output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() { return Some(s.lines().next()?.to_string()); }
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(out) = std::process::Command::new("tailscale").arg("ip").output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() { return Some(s.lines().next()?.to_string()); }
-            }
-        }
-    }
-    None
-}
-
-fn open_url(url: &str) {
-    #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("cmd").args(["/c","start",url]).spawn(); }
-    #[cfg(target_os = "linux")]
-    { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
 }
 
 fn format_bytes(b: u64) -> String {

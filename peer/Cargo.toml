@@ -25,7 +25,6 @@ tracing             = "0.1"
 tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite   = { version = "0.21", features = ["native-tls"] }
 futures-util        = "0.3"
-urlencoding         = "2"
 
 [profile.release]
 opt-level     = 3
