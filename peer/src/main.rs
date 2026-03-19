@@ -3,6 +3,7 @@
 mod capture;
 mod client;
 mod config;
+mod icon;
 mod input;
 mod protocol;
 mod server;
@@ -657,11 +658,17 @@ fn egui_key_str(key: egui::Key) -> Option<String> {
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt().with_env_filter("remote_link=info").init();
+    let icon = egui::IconData {
+        rgba:   icon::ICON_RGBA.to_vec(),
+        width:  icon::ICON_WIDTH,
+        height: icon::ICON_HEIGHT,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RemoteLink")
             .with_inner_size([460.0, 540.0])
-            .with_min_inner_size([380.0, 400.0]),
+            .with_min_inner_size([380.0, 400.0])
+            .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
     eframe::run_native("RemoteLink", options, Box::new(|cc| Box::new(App::new(cc))))

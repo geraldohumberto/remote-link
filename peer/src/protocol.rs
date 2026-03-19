@@ -31,6 +31,7 @@ pub enum Message {
     FileDone    { filename: String, bytes: u64 },
     FileError   { reason: String },
     Ping, Pong, Disconnect,
+    RawBytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
