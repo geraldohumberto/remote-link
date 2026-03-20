@@ -63,6 +63,7 @@ struct App {
     cfg_saved:     bool,
     // info
     local_ip:      String,
+    drag_status:   String,
 }
 
 impl App {
@@ -104,6 +105,7 @@ impl App {
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
             local_ip,
+            drag_status: String::new(),
         }
     }
 
@@ -181,6 +183,7 @@ impl App {
                 }
                 Evt::FileDone { filename, bytes } => {
                     self.file_status = format!("OK: {} ({} bytes)", filename, bytes);
+                    self.drag_status = format!("Enviado: {}", filename);
                     self.send_cmd(Cmd::FileList);
                 }
                 Evt::FileError { reason } => { self.file_status = format!("Erro: {}", reason); }
@@ -230,8 +233,44 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_events(ctx);
+
+        // Redimensiona janela conforme tela
+        let target_size = match self.screen {
+            Screen::Settings => Vec2::new(460.0, 500.0),
+            Screen::Remote | Screen::Files => Vec2::new(900.0, 600.0),
+            _ => Vec2::new(420.0, 310.0),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_size));
+
+        // Drag and drop — funciona em qualquer tela
+        let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            if let Some(path) = &file.path {
+                let src = path.to_string_lossy().to_string();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if self.cmd_tx.is_some() {
+                    self.drag_status = format!("Enviando {}...", name);
+                    self.send_cmd(Cmd::FileUpload { src });
+                } else {
+                    self.drag_status = "Conecte-se a um PC remoto primeiro.".to_string();
+                }
+            }
+        }
+        // Feedback visual de arquivo sendo arrastado sobre a janela
+        let is_hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if is_hovering && self.cmd_tx.is_some() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("Solte para enviar ao PC remoto")
+                        .size(18.0)
+                        .color(egui::Color32::from_rgb(0, 212, 255)));
+                });
+            });
+            return;
+        }
+
         match self.screen.clone() {
             Screen::FirstRun => self.ui_first_run(ctx),
             Screen::Main     => self.ui_main(ctx),
@@ -354,6 +393,18 @@ impl App {
                 });
 
                 ui.add_space(6.0);
+
+                if !self.drag_status.is_empty() {
+                    ui.add_space(4.0);
+                    let color = if self.drag_status.starts_with("Enviando") {
+                        egui::Color32::from_rgb(0,212,255)
+                    } else {
+                        egui::Color32::from_rgb(255,80,80)
+                    };
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(&self.drag_status).size(11.0).color(color));
+                    });
+                }
 
                 if !self.conn_error.is_empty() {
                     ui.label(RichText::new(&self.conn_error).color(Color32::from_rgb(255,80,80)).size(11.0));
@@ -600,19 +651,21 @@ impl App {
             }
 
             ui.add_space(12.0);
-            let btn = egui::Button::new(RichText::new("Salvar").size(13.0))
-                .fill(Color32::from_rgb(0,180,220)).min_size(Vec2::new(140.0,32.0));
-            if ui.add(btn).clicked() {
-                self.config.password      = self.cfg_pass.clone();
-                self.config.port          = self.cfg_port.parse().unwrap_or(7890);
-                self.config.fps           = self.cfg_fps.parse().unwrap_or(15);
-                self.config.jpeg_quality  = self.cfg_quality.parse::<u8>().unwrap_or(55).clamp(10,95);
-                self.config.shared_folder = self.cfg_folder.clone();
-                self.config.relay_host    = self.cfg_relay_host.clone();
-                self.config.relay_port    = self.cfg_relay_port.parse().unwrap_or(7891);
-                self.config.save();
-                self.cfg_saved = true;
-            }
+            ui.vertical_centered(|ui| {
+                let btn = egui::Button::new(RichText::new("Salvar").size(13.0))
+                    .fill(Color32::from_rgb(0,180,220)).min_size(Vec2::new(140.0,32.0));
+                if ui.add(btn).clicked() {
+                    self.config.password      = self.cfg_pass.clone();
+                    self.config.port          = self.cfg_port.parse().unwrap_or(7890);
+                    self.config.fps           = self.cfg_fps.parse().unwrap_or(15);
+                    self.config.jpeg_quality  = self.cfg_quality.parse::<u8>().unwrap_or(55).clamp(10,95);
+                    self.config.shared_folder = self.cfg_folder.clone();
+                    self.config.relay_host    = self.cfg_relay_host.clone();
+                    self.config.relay_port    = self.cfg_relay_port.parse().unwrap_or(7891);
+                    self.config.save();
+                    self.cfg_saved = true;
+                }
+            });
             if self.cfg_saved {
                 ui.add_space(4.0);
                 ui.label(RichText::new("Salvo! Reinicie para aplicar mudanca de porta.").size(11.0).color(Color32::from_rgb(34,211,165)));
