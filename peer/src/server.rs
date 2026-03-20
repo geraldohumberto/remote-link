@@ -43,7 +43,7 @@ pub async fn run(config: Arc<Config>) {
 /// Quando um peer conecta via relay, entrega o stream ao handle().
 /// Após cada sessão (ou falha), re-registra automaticamente.
 async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Config>) {
-    let my_id = config.relay_id_host();
+    let my_id = config.machine_id.clone();
     info!("Relay register loop — ID: {}", my_id);
 
     loop {

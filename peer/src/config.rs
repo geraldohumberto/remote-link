@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use uuid::Uuid;
 use crate::protocol::{DEFAULT_PASSWORD, DEFAULT_PEER_PORT, DEFAULT_RELAY_PORT, FPS_TARGET, JPEG_QUALITY};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,10 +18,12 @@ pub struct Config {
     pub use_relay:           bool,
     pub relay_host:          String,
     pub relay_port:          u16,
-    /// ID único deste host no relay (ex: "pc-empresa", "home-humberto")
-    /// Se vazio, usa relay_host:port como fallback
+    /// ID único desta máquina — gerado automaticamente na primeira execução
     #[serde(default)]
-    pub relay_id:            String,
+    pub machine_id:          String,
+    /// ID do host remoto que o usuário quer acessar
+    #[serde(default)]
+    pub remote_id:           String,
 }
 
 impl Default for Config {
@@ -42,7 +45,8 @@ impl Default for Config {
             use_relay:           false,
             relay_host:          String::new(),
             relay_port:          DEFAULT_RELAY_PORT,
-            relay_id:            String::new(),
+            machine_id:          Self::generate_id(),
+            remote_id:           String::new(),
         }
     }
 }
@@ -54,11 +58,23 @@ impl Config {
             .join(".remote-link.json")
     }
 
+    /// Gera um ID curto legível tipo "A7X-92K"
+    fn generate_id() -> String {
+        let id = Uuid::new_v4().to_string();
+        let parts: Vec<&str> = id.split('-').collect();
+        format!("{}-{}", &parts[0][..3].to_uppercase(), &parts[1][..3].to_uppercase())
+    }
+
     pub fn load() -> Self {
         let p = Self::path();
         if p.exists() {
             if let Ok(s) = std::fs::read_to_string(&p) {
-                if let Ok(c) = serde_json::from_str::<Config>(&s) {
+                if let Ok(mut c) = serde_json::from_str::<Config>(&s) {
+                    // Garante que machine_id existe (migração de configs antigas)
+                    if c.machine_id.is_empty() {
+                        c.machine_id = Self::generate_id();
+                        c.save();
+                    }
                     let _ = std::fs::create_dir_all(&c.shared_folder);
                     return c;
                 }
@@ -80,7 +96,7 @@ impl Config {
         PathBuf::from(&self.shared_folder)
     }
 
-    /// Retorna (relay_host, relay_port) se o relay estiver habilitado e configurado.
+    /// Retorna (relay_host, relay_port) se relay habilitado e configurado
     pub fn relay(&self) -> Option<(String, u16)> {
         if self.use_relay && !self.relay_host.is_empty() {
             Some((self.relay_host.clone(), self.relay_port))
@@ -89,17 +105,8 @@ impl Config {
         }
     }
 
-    /// ID que identifica este host no relay.
-    /// Se `relay_id` estiver preenchido, usa ele.
-    /// Caso contrário, usa o hostname da máquina.
-    /// O cliente vai usar esse ID para conectar via relay.
+    /// ID desta máquina no relay
     pub fn relay_id_host(&self) -> String {
-        if !self.relay_id.is_empty() {
-            return self.relay_id.clone();
-        }
-        hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "remotelink-host".to_string())
+        self.machine_id.clone()
     }
 }

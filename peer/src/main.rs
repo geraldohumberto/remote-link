@@ -30,15 +30,9 @@ struct App {
     fr_pass2:      String,
     fr_error:      String,
     // connect
-    host_buf:      String,
-    port_buf:      String,
     pass_buf:      String,
     conn_error:    String,
     connecting:    bool,
-    // relay
-    use_relay:     bool,
-    relay_host:    String,
-    relay_port:    String,
     // session
     cmd_tx:        Option<mpsc::Sender<Cmd>>,
     evt_rx:        Option<mpsc::Receiver<Evt>>,
@@ -66,7 +60,6 @@ struct App {
     cfg_folder:    String,
     cfg_relay_host: String,
     cfg_relay_port: String,
-    cfg_relay_id:   String,
     cfg_saved:     bool,
     // info
     local_ip:      String,
@@ -89,12 +82,6 @@ impl App {
         let cfg_folder  = config.shared_folder.clone();
         let cfg_relay_host = config.relay_host.clone();
         let cfg_relay_port = config.relay_port.to_string();
-        let cfg_relay_id   = config.relay_id.clone();
-        let host_buf    = config.last_host.clone();
-        let port_buf    = config.last_port.to_string();
-        let use_relay   = config.use_relay;
-        let relay_host  = config.relay_host.clone();
-        let relay_port  = config.relay_port.to_string();
         let local_ip    = get_local_ip();
         let rt          = Arc::new(Runtime::new().expect("tokio runtime"));
 
@@ -106,9 +93,8 @@ impl App {
         Self {
             config, screen, rt,
             fr_pass1: String::new(), fr_pass2: String::new(), fr_error: String::new(),
-            host_buf, port_buf, pass_buf: String::new(),
+            pass_buf: String::new(),
             conn_error: String::new(), connecting: false,
-            use_relay, relay_host, relay_port,
             cmd_tx: None, evt_rx: None,
             server_w: 1920, server_h: 1080, peer_platform: String::new(),
             frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0, fps_count: 0,
@@ -116,7 +102,7 @@ impl App {
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
-            cfg_relay_host, cfg_relay_port, cfg_relay_id, cfg_saved: false,
+            cfg_relay_host, cfg_relay_port, cfg_saved: false,
             local_ip,
         }
     }
@@ -216,13 +202,11 @@ impl App {
     }
 
     fn do_connect(&mut self) {
-        let host = self.host_buf.trim().to_string();
-        let port = self.port_buf.trim().parse::<u16>().unwrap_or(7890);
+        let remote_id = self.config.remote_id.trim().to_string();
         let pass = if self.pass_buf.is_empty() { self.config.password.clone() } else { self.pass_buf.clone() };
 
-        let relay = if self.use_relay && !self.relay_host.trim().is_empty() {
-            let rport = self.relay_port.trim().parse::<u16>().unwrap_or(7891);
-            Some((self.relay_host.trim().to_string(), rport))
+        let relay = if self.config.use_relay && !self.config.relay_host.trim().is_empty() {
+            Some((self.config.relay_host.trim().to_string(), self.config.relay_port))
         } else {
             None
         };
@@ -231,12 +215,11 @@ impl App {
         let (evt_tx, evt_rx) = mpsc::channel::<Evt>(256);
         self.cmd_tx = Some(cmd_tx); self.evt_rx = Some(evt_rx);
         self.connecting = true; self.conn_error = String::new();
-        self.config.last_host = host.clone(); self.config.last_port = port;
-        self.config.use_relay = self.use_relay;
-        self.config.relay_host = self.relay_host.trim().to_string();
-        self.config.relay_port = self.relay_port.trim().parse().unwrap_or(7891);
         self.config.save();
-        self.rt.spawn(client::connect(host, port, pass, relay, self.config.relay_id.clone(), cmd_rx, evt_tx));
+        // host e port não são mais usados na conexão via relay — passa vazio
+        let host = String::new();
+        let port = self.config.port;
+        self.rt.spawn(client::connect(host, port, pass, relay, remote_id, cmd_rx, evt_tx));
     }
 
     fn disconnect(&mut self) {
@@ -319,10 +302,10 @@ impl App {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(16.0);
+            ui.add_space(12.0);
 
-            // Status servidor local
-            egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(10.0).inner_margin(egui::Margin::same(14.0)).show(ui, |ui| {
+            // Status servidor + ID desta máquina
+            egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(Color32::from_rgb(34,197,94)).size(13.0));
                     ui.label(RichText::new("Servidor ativo").size(12.0));
@@ -330,79 +313,66 @@ impl App {
                         ui.label(RichText::new(format!(":{}", self.config.port)).size(11.0).color(Color32::GRAY));
                     });
                 });
-                ui.add_space(6.0);
-
-                // IP Local
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("IP Local:").size(11.0).color(Color32::GRAY));
-                    ui.label(RichText::new(&self.local_ip).size(11.0).color(Color32::from_rgb(0,212,255)));
-                    if ui.small_button("copiar").clicked() { ctx.output_mut(|o| o.copied_text = self.local_ip.clone()); }
+                    ui.label(RichText::new("Seu ID:").size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new(&self.config.machine_id).size(13.0).color(Color32::from_rgb(0,212,255)).strong());
+                    if ui.small_button("copiar").clicked() {
+                        ctx.output_mut(|o| o.copied_text = self.config.machine_id.clone());
+                    }
                 });
+                // Status relay
+                if self.config.use_relay {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("●").color(Color32::from_rgb(0,212,255)).size(11.0));
+                        ui.label(RichText::new(format!("Relay: {}", self.config.relay_host)).size(10.0).color(Color32::GRAY));
+                    });
+                }
             });
 
-            ui.add_space(14.0);
+            ui.add_space(10.0);
             ui.separator();
-            ui.add_space(12.0);
+            ui.add_space(10.0);
 
             ui.label(RichText::new("Conectar em outro PC").size(13.0).strong());
             ui.add_space(8.0);
 
             egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(10.0).inner_margin(egui::Margin::same(14.0)).show(ui, |ui| {
                 egui::Grid::new("conn_grid").num_columns(2).spacing([8.0,8.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Host / IP").size(11.0).color(Color32::GRAY));
-                    ui.add(egui::TextEdit::singleline(&mut self.host_buf).desired_width(f32::INFINITY).hint_text("192.168.1.x ou 100.x.x.x"));
-                    ui.end_row();
-                    ui.label(RichText::new("Porta").size(11.0).color(Color32::GRAY));
-                    ui.add(egui::TextEdit::singleline(&mut self.port_buf).desired_width(70.0).hint_text("7890"));
+                    ui.label(RichText::new("ID do host remoto").size(11.0).color(Color32::GRAY));
+                    ui.add(egui::TextEdit::singleline(&mut self.config.remote_id)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("ex: A7X-92K"));
                     ui.end_row();
                     ui.label(RichText::new("Senha").size(11.0).color(Color32::GRAY));
-                    ui.add(egui::TextEdit::singleline(&mut self.pass_buf).password(true).desired_width(f32::INFINITY).hint_text("senha do peer remoto"));
+                    ui.add(egui::TextEdit::singleline(&mut self.pass_buf)
+                        .password(true)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("senha do peer remoto"));
                     ui.end_row();
                 });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // Relay
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.use_relay, RichText::new("Usar relay").size(11.0));
-                    ui.label(RichText::new("(para conexoes pela internet sem VPN)").size(10.0).color(Color32::DARK_GRAY));
-                });
-
-                if self.use_relay {
-                    ui.add_space(6.0);
-                    egui::Grid::new("relay_grid").num_columns(2).spacing([8.0,6.0]).show(ui, |ui| {
-                        ui.label(RichText::new("Relay host").size(11.0).color(Color32::GRAY));
-                        ui.add(egui::TextEdit::singleline(&mut self.relay_host).desired_width(f32::INFINITY).hint_text("relay.exemplo.com ou IP"));
-                        ui.end_row();
-                        ui.label(RichText::new("Relay porta").size(11.0).color(Color32::GRAY));
-                        ui.add(egui::TextEdit::singleline(&mut self.relay_port).desired_width(70.0).hint_text("7891"));
-                        ui.end_row();
-                        ui.label(RichText::new("ID do host remoto").size(11.0).color(Color32::GRAY));
-                        ui.add(egui::TextEdit::singleline(&mut self.config.relay_id).desired_width(f32::INFINITY).hint_text("ex: pc-empresa"));
-                        ui.end_row();
-                    });
-                }
-
-                ui.add_space(10.0);
+                ui.add_space(6.0);
 
                 if !self.conn_error.is_empty() {
                     ui.label(RichText::new(&self.conn_error).color(Color32::from_rgb(255,80,80)).size(11.0));
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                 }
 
-                let label = if self.connecting { "Conectando..." } else { "Conectar" };
-                let btn = egui::Button::new(RichText::new(label).size(13.0))
-                    .fill(if self.connecting { Color32::DARK_GRAY } else { Color32::from_rgb(0,180,220) })
-                    .min_size(Vec2::new(f32::INFINITY, 34.0));
-                if ui.add_enabled(!self.connecting && !self.host_buf.trim().is_empty(), btn).clicked() {
-                    self.do_connect();
-                }
+                // Botão centralizado e menor
+                ui.vertical_centered(|ui| {
+                    let label = if self.connecting { "Conectando..." } else { "Conectar" };
+                    let btn = egui::Button::new(RichText::new(label).size(13.0))
+                        .fill(if self.connecting { Color32::DARK_GRAY } else { Color32::from_rgb(0,180,220) })
+                        .min_size(Vec2::new(160.0, 32.0));
+                    if ui.add_enabled(!self.connecting && !self.config.remote_id.trim().is_empty(), btn).clicked() {
+                        self.do_connect();
+                    }
+                });
             });
         });
     }
-
     fn ui_remote(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("remote_bar")
             .frame(egui::Frame::none().fill(Color32::from_rgb(19,19,26)).inner_margin(egui::Margin::symmetric(8.0,6.0)))
@@ -565,10 +535,24 @@ impl App {
                 });
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(14.0);
+            ui.add_space(10.0);
+
+            // ID desta máquina
+            egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(8.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Seu ID:").size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new(&self.config.machine_id).size(14.0).color(Color32::from_rgb(0,212,255)).strong());
+                    if ui.small_button("copiar").clicked() {
+                        ctx.output_mut(|o| o.copied_text = self.config.machine_id.clone());
+                    }
+                });
+                ui.label(RichText::new("Compartilhe este ID com quem quiser te acessar.").size(10.0).color(Color32::DARK_GRAY));
+            });
+
+            ui.add_space(10.0);
             ui.label(RichText::new("Servidor (este PC)").size(11.0).color(Color32::GRAY));
-            ui.add_space(8.0);
-            egui::Grid::new("cfg_grid").num_columns(2).spacing([10.0,10.0]).show(ui, |ui| {
+            ui.add_space(6.0);
+            egui::Grid::new("cfg_grid").num_columns(2).spacing([10.0,8.0]).show(ui, |ui| {
                 ui.label(RichText::new("Senha").size(11.0).color(Color32::GRAY));
                 ui.add(egui::TextEdit::singleline(&mut self.cfg_pass).password(true).desired_width(200.0));
                 ui.end_row();
@@ -586,24 +570,36 @@ impl App {
                 ui.end_row();
             });
 
-            ui.add_space(14.0);
-            ui.separator();
             ui.add_space(10.0);
-            ui.label(RichText::new("Relay (para internet sem VPN)").size(11.0).color(Color32::GRAY));
+            ui.separator();
             ui.add_space(8.0);
-            egui::Grid::new("relay_cfg").num_columns(2).spacing([10.0,10.0]).show(ui, |ui| {
-                ui.label(RichText::new("Relay host").size(11.0).color(Color32::GRAY));
-                ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_host).desired_width(220.0).hint_text("IP ou dominio do relay"));
-                ui.end_row();
-                ui.label(RichText::new("Relay porta").size(11.0).color(Color32::GRAY));
-                ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_port).desired_width(70.0).hint_text("7891"));
-                ui.end_row();
-                ui.label(RichText::new("ID deste host no relay").size(11.0).color(Color32::GRAY));
-                ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_id).desired_width(220.0).hint_text("ex: pc-empresa (deixe vazio para usar hostname)"));
-                ui.end_row();
+
+            // Toggle relay
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Relay (internet sem VPN)").size(11.0).color(Color32::GRAY));
+                let label = if self.config.use_relay {
+                    RichText::new("● Ativo").color(Color32::from_rgb(0,212,255)).size(11.0)
+                } else {
+                    RichText::new("○ Inativo").color(Color32::DARK_GRAY).size(11.0)
+                };
+                if ui.button(label).clicked() {
+                    self.config.use_relay = !self.config.use_relay;
+                }
             });
 
-            ui.add_space(14.0);
+            if self.config.use_relay {
+                ui.add_space(6.0);
+                egui::Grid::new("relay_cfg").num_columns(2).spacing([10.0,8.0]).show(ui, |ui| {
+                    ui.label(RichText::new("Relay host").size(11.0).color(Color32::GRAY));
+                    ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_host).desired_width(220.0).hint_text("IP ou dominio do relay"));
+                    ui.end_row();
+                    ui.label(RichText::new("Relay porta").size(11.0).color(Color32::GRAY));
+                    ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_port).desired_width(70.0).hint_text("7891"));
+                    ui.end_row();
+                });
+            }
+
+            ui.add_space(12.0);
             let btn = egui::Button::new(RichText::new("Salvar").size(13.0))
                 .fill(Color32::from_rgb(0,180,220)).min_size(Vec2::new(140.0,32.0));
             if ui.add(btn).clicked() {
@@ -614,24 +610,19 @@ impl App {
                 self.config.shared_folder = self.cfg_folder.clone();
                 self.config.relay_host    = self.cfg_relay_host.clone();
                 self.config.relay_port    = self.cfg_relay_port.parse().unwrap_or(7891);
-                self.config.relay_id      = self.cfg_relay_id.clone();
                 self.config.save();
-                self.cfg_relay_host = self.config.relay_host.clone();
-                self.relay_host     = self.config.relay_host.clone();
-                self.cfg_relay_id   = self.config.relay_id.clone();
                 self.cfg_saved = true;
             }
             if self.cfg_saved {
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 ui.label(RichText::new("Salvo! Reinicie para aplicar mudanca de porta.").size(11.0).color(Color32::from_rgb(34,211,165)));
             }
-            ui.add_space(12.0);
-            ui.separator();
             ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
             ui.label(RichText::new(format!("Config: {}/.remote-link.json",
                 dirs::home_dir().unwrap_or_default().display())).size(9.0).color(Color32::DARK_GRAY));
         });
-    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
