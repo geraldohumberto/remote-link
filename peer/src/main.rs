@@ -47,6 +47,9 @@ struct App {
     peer_platform: String,
     // frame
     frame_tex:     Option<egui::TextureHandle>,
+    canvas:        Option<Vec<u8>>,   // buffer RGBA da tela completa
+    canvas_w:      u32,
+    canvas_h:      u32,
     fps_count:     u32,
     fps_last:      std::time::Instant,
     fps_display:   f32,
@@ -108,7 +111,7 @@ impl App {
             use_relay, relay_host, relay_port,
             cmd_tx: None, evt_rx: None,
             server_w: 1920, server_h: 1080, peer_platform: String::new(),
-            frame_tex: None, fps_count: 0,
+            frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0, fps_count: 0,
             fps_last: std::time::Instant::now(), fps_display: 0.0,
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),
@@ -136,16 +139,54 @@ impl App {
                 Evt::Frame { jpeg } => {
                     if let Ok(img) = image::load_from_memory(&jpeg) {
                         let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                        let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                        let (w, h) = (rgba.width(), rgba.height());
+                        self.canvas = Some(rgba.into_raw());
+                        self.canvas_w = w; self.canvas_h = h;
+                        let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize],
+                            self.canvas.as_ref().unwrap());
                         self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
                     }
                     self.fps_count += 1;
                     let elapsed = self.fps_last.elapsed().as_secs_f32();
                     if elapsed >= 1.0 {
                         self.fps_display = self.fps_count as f32 / elapsed;
-                        self.fps_count = 0;
-                        self.fps_last = std::time::Instant::now();
+                        self.fps_count = 0; self.fps_last = std::time::Instant::now();
+                    }
+                    ctx.request_repaint();
+                }
+                Evt::FrameDelta { screen_w, screen_h, blocks } => {
+                    // Inicializa canvas se necessário
+                    if self.canvas.is_none() || self.canvas_w != screen_w || self.canvas_h != screen_h {
+                        self.canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
+                        self.canvas_w = screen_w; self.canvas_h = screen_h;
+                    }
+                    let canvas = self.canvas.as_mut().unwrap();
+                    // Aplica cada bloco no canvas
+                    for (block, jpeg) in &blocks {
+                        if let Ok(img) = image::load_from_memory(jpeg) {
+                            let rgba = img.to_rgba8();
+                            for y in 0..block.h {
+                                for x in 0..block.w {
+                                    let px = rgba.get_pixel(x, y);
+                                    let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
+                                    if idx + 3 < canvas.len() {
+                                        canvas[idx]   = px[0];
+                                        canvas[idx+1] = px[1];
+                                        canvas[idx+2] = px[2];
+                                        canvas[idx+3] = px[3];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let ci = egui::ColorImage::from_rgba_unmultiplied(
+                        [screen_w as usize, screen_h as usize], canvas);
+                    self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
+                    self.fps_count += 1;
+                    let elapsed = self.fps_last.elapsed().as_secs_f32();
+                    if elapsed >= 1.0 {
+                        self.fps_display = self.fps_count as f32 / elapsed;
+                        self.fps_count = 0; self.fps_last = std::time::Instant::now();
                     }
                     ctx.request_repaint();
                 }

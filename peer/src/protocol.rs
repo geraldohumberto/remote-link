@@ -10,6 +10,7 @@ pub const DEFAULT_PASSWORD:   &str = "remotelink123";
 pub const CHUNK_SIZE:         usize = 65_536;
 pub const JPEG_QUALITY:       u8   = 55;
 pub const FPS_TARGET:         u64  = 15;
+pub const BLOCK_SIZE:         u32  = 64;
 
 pub type Writer = Arc<Mutex<OwnedWriteHalf>>;
 pub type Reader = OwnedReadHalf;
@@ -21,6 +22,8 @@ pub enum Message {
     AuthOk      { screen_w: u32, screen_h: u32, platform: String, peer_id: String },
     AuthFail    { reason: String },
     FrameInfo   { width: u32, height: u32, size: u32 },
+    // Delta: envia só os blocos que mudaram
+    FrameDelta  { screen_w: u32, screen_h: u32, blocks: Vec<BlockInfo> },
     Input(InputEvent),
     Clipboard   { text: String },
     FileListReq { folder: Option<String> },
@@ -31,6 +34,16 @@ pub enum Message {
     FileDone    { filename: String, bytes: u64 },
     FileError   { reason: String },
     Ping, Pong, Disconnect,
+}
+
+/// Metadados de um bloco que mudou
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInfo {
+    pub x:    u32,   // coluna do bloco em pixels
+    pub y:    u32,   // linha do bloco em pixels
+    pub w:    u32,   // largura real (pode ser menor na borda direita/inferior)
+    pub h:    u32,
+    pub size: u32,   // tamanho do JPEG deste bloco em bytes
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

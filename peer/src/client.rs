@@ -21,6 +21,7 @@ pub enum Cmd {
 pub enum Evt {
     Connected   { screen_w: u32, screen_h: u32, platform: String },
     Frame       { jpeg: Vec<u8> },
+    FrameDelta  { screen_w: u32, screen_h: u32, blocks: Vec<(crate::protocol::BlockInfo, Vec<u8>)> },
     FileList    { folder: String, items: Vec<FileItem> },
     FileDone    { filename: String, bytes: u64 },
     FileError   { reason: String },
@@ -136,6 +137,19 @@ async fn tcp_session(
     let recv_task = tokio::spawn(async move {
         loop {
             match recv_msg(&mut reader).await {
+                Ok(Message::FrameDelta { screen_w, screen_h, blocks }) => {
+                    let mut block_data = Vec::with_capacity(blocks.len());
+                    let mut ok = true;
+                    for b in &blocks {
+                        match recv_bytes(&mut reader, b.size as usize).await {
+                            Ok(jpeg) => block_data.push((b.clone(), jpeg)),
+                            Err(_)   => { ok = false; break; }
+                        }
+                    }
+                    if ok {
+                        let _ = tx2.send(Evt::FrameDelta { screen_w, screen_h, blocks: block_data }).await;
+                    }
+                }
                 Ok(Message::FrameInfo { size, .. }) => {
                     if let Ok(jpeg) = recv_bytes(&mut reader, size as usize).await {
                         let _ = tx2.send(Evt::Frame { jpeg }).await;

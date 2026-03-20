@@ -138,7 +138,9 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         _ => anyhow::bail!("Protocolo inesperado na auth"),
     }
 
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    // Canal: (screen_w, screen_h, blocos_delta)
+    type DeltaMsg = (u32, u32, Vec<(crate::protocol::BlockInfo, Vec<u8>)>);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<DeltaMsg>(2);
     let quality = config.jpeg_quality;
     let fps     = config.fps;
 
@@ -150,10 +152,11 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         let interval_ms = std::time::Duration::from_millis(1000 / fps);
         loop {
             let t0 = std::time::Instant::now();
-            match cap.capture_jpeg(quality) {
-                Ok(jpeg) => {
-                    if frame_tx.blocking_send(jpeg).is_err() { break; }
+            match cap.capture_delta(quality) {
+                Ok(Some(delta)) => {
+                    if frame_tx.blocking_send(delta).is_err() { break; }
                 }
+                Ok(None) => {} // nada mudou, pula
                 Err(e) => { warn!("Captura falhou: {}", e); }
             }
             let elapsed = t0.elapsed();
@@ -165,14 +168,14 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
 
     let w2 = writer.clone();
     let frame_task = tokio::spawn(async move {
-        while let Some(jpeg) = frame_rx.recv().await {
-            let size = jpeg.len() as u32;
-            if send_msg_bytes(
-                &w2,
-                &Message::FrameInfo { width: 0, height: 0, size },
-                &jpeg,
-            ).await.is_err() {
-                break;
+        while let Some((sw, sh, blocks)) = frame_rx.recv().await {
+            let block_infos: Vec<crate::protocol::BlockInfo> = blocks.iter().map(|(b,_)| b.clone()).collect();
+            if send_msg(&w2, &Message::FrameDelta {
+                screen_w: sw, screen_h: sh, blocks: block_infos,
+            }).await.is_err() { break; }
+            for (_, jpeg) in &blocks {
+                let mut g = w2.lock().await;
+                if g.write_all(jpeg).await.is_err() { break; }
             }
         }
     });
