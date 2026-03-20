@@ -34,6 +34,7 @@ pub async fn connect(
     port: u16,
     password: String,
     relay: Option<(String, u16)>,
+    relay_id: String,
     mut cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
@@ -60,7 +61,12 @@ pub async fn connect(
         Ok(Ok(s)) => { info!("Direto: {}", direct_addr); s }
         _ => {
             if let Some((rhost, rport)) = relay {
-                match tcp_relay(&rhost, rport, &host, port).await {
+                let id = if relay_id.is_empty() {
+                    format!("{}:{}", host, port)
+                } else {
+                    relay_id.clone()
+                };
+                match tcp_relay(&rhost, rport, &id).await {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = evt_tx.send(Evt::Error {
@@ -331,13 +337,12 @@ async fn ws_cmd_loop(mut cmd_rx: mpsc::Receiver<Cmd>, out_tx: mpsc::Sender<Vec<u
 // ── Relay TCP simples ────────────────────────────────────────────────────
 async fn tcp_relay(
     relay_host: &str, relay_port: u16,
-    target_host: &str, target_port: u16,
+    peer_id: &str,
 ) -> anyhow::Result<TcpStream> {
     let relay_addr = format!("{}:{}", relay_host, relay_port);
     let mut stream = TcpStream::connect(&relay_addr).await?;
     stream.set_nodelay(true)?;
-    let peer_id = format!("{}:{}", target_host, target_port);
-    let msg = serde_json::json!({"action":"connect","id":peer_id}).to_string() + "\n";
+    let msg = serde_json::json!({"action":"connect","id": peer_id}).to_string() + "\n";
     stream.write_all(msg.as_bytes()).await?;
     let (reader, writer) = stream.into_split();
     let mut buf = BufReader::new(reader);

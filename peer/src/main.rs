@@ -195,7 +195,7 @@ impl App {
         self.config.relay_host = self.relay_host.trim().to_string();
         self.config.relay_port = self.relay_port.trim().parse().unwrap_or(7891);
         self.config.save();
-        self.rt.spawn(client::connect(host, port, pass, relay, cmd_rx, evt_tx));
+        self.rt.spawn(client::connect(host, port, pass, relay, self.config.relay_id.clone(), cmd_rx, evt_tx));
     }
 
     fn disconnect(&mut self) {
