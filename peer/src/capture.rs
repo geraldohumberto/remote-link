@@ -1,5 +1,5 @@
 use anyhow::Result;
-use image::{ImageBuffer, Rgb, RgbImage};
+use image::{ImageBuffer, Rgba, RgbImage};
 use xcap::Monitor;
 use crate::protocol::{BlockInfo, BLOCK_SIZE};
 
@@ -82,18 +82,17 @@ impl Capturer {
         self.prev_frame = Some(rgb.clone());
         jpeg_encode(&rgb, quality)
     }
-
     pub fn size(&self) -> (u32, u32) { (self.width, self.height) }
 }
 
-fn to_rgb(frame: &image::DynamicImage, tw: u32, th: u32) -> RgbImage {
+fn to_rgb(frame: &ImageBuffer<Rgba<u8>, Vec<u8>>, tw: u32, th: u32) -> RgbImage {
     let (w, h) = (frame.width(), frame.height());
     if tw != w || th != h {
         let resized = image::imageops::resize(frame, tw, th, image::imageops::FilterType::Nearest);
         let raw: Vec<u8> = resized.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
         ImageBuffer::from_raw(tw, th, raw).unwrap()
     } else {
-        let raw: Vec<u8> = frame.to_rgb8().pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let raw: Vec<u8> = frame.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
         ImageBuffer::from_raw(w, h, raw).unwrap()
     }
 }
