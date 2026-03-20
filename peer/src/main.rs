@@ -400,6 +400,7 @@ impl App {
                     let (x,y) = to_srv(pos);
                     self.send_cmd(Cmd::Input(InputEvent::MouseMove { x, y }));
                 }
+                // Click esquerdo
                 if resp.clicked() {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let (x,y) = to_srv(pos);
@@ -407,6 +408,20 @@ impl App {
                         self.send_cmd(Cmd::Input(InputEvent::MouseUp   { x, y, button: MouseBtn::Left }));
                     }
                 }
+                // Drag esquerdo — MouseDown ao começar, MouseUp ao soltar
+                if resp.drag_started_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let (x,y) = to_srv(pos);
+                        self.send_cmd(Cmd::Input(InputEvent::MouseDown { x, y, button: MouseBtn::Left }));
+                    }
+                }
+                if resp.drag_stopped_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let (x,y) = to_srv(pos);
+                        self.send_cmd(Cmd::Input(InputEvent::MouseUp { x, y, button: MouseBtn::Left }));
+                    }
+                }
+                // Click direito
                 if resp.secondary_clicked() {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let (x,y) = to_srv(pos);

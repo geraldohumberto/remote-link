@@ -30,18 +30,17 @@ impl Capturer {
         } else {
             (w, h)
         };
+
+        // Converte RGBA → RGB direto sem from_fn pixel a pixel
         let rgb: ImageBuffer<Rgb<u8>, Vec<u8>> = if tw != w || th != h {
             let resized = image::imageops::resize(&frame, tw, th, image::imageops::FilterType::Nearest);
-            ImageBuffer::from_fn(tw, th, |x, y| {
-                let p = resized.get_pixel(x, y);
-                Rgb([p[0], p[1], p[2]])
-            })
+            let raw: Vec<u8> = resized.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+            ImageBuffer::from_raw(tw, th, raw).ok_or_else(|| anyhow::anyhow!("buffer inválido"))?
         } else {
-            ImageBuffer::from_fn(w, h, |x, y| {
-                let p = frame.get_pixel(x, y);
-                Rgb([p[0], p[1], p[2]])
-            })
+            let raw: Vec<u8> = frame.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+            ImageBuffer::from_raw(w, h, raw).ok_or_else(|| anyhow::anyhow!("buffer inválido"))?
         };
+
         let mut buf = std::io::Cursor::new(Vec::new());
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
         enc.encode_image(&rgb)?;

@@ -52,6 +52,24 @@ pub async fn connect(
         return;
     }
 
+    // Se tem relay e relay_id configurado, vai direto pro relay sem tentar IP local
+    if relay.is_some() && !relay_id.is_empty() {
+        if let Some((rhost, rport)) = relay {
+            match tcp_relay(&rhost, rport, &relay_id).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true).ok();
+                    tcp_session(stream, password, cmd_rx, evt_tx).await;
+                }
+                Err(e) => {
+                    let _ = evt_tx.send(Evt::Error {
+                        reason: format!("Relay TCP falhou: {}", e),
+                    }).await;
+                }
+            }
+        }
+        return;
+    }
+
     // Tenta TCP direto
     let direct_addr = format!("{}:{}", host, port);
     let stream = match tokio::time::timeout(
