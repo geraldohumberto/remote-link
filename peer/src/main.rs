@@ -623,6 +623,7 @@ impl App {
             ui.label(RichText::new(format!("Config: {}/.remote-link.json",
                 dirs::home_dir().unwrap_or_default().display())).size(9.0).color(Color32::DARK_GRAY));
         });
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
