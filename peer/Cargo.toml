@@ -1,6 +1,6 @@
 [package]
 name        = "remote-link"
-version     = "0.1.0"
+version     = "0.1.5"
 edition     = "2021"
 description = "Acesso remoto peer-to-peer"
 
@@ -21,6 +21,7 @@ anyhow      = "1"
 dirs        = "5"
 arboard     = "3"
 uuid        = { version = "1", features = ["v4"] }
+hostname    = "0.5"
 tracing             = "0.1"
 tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite   = { version = "0.21", features = ["native-tls"] }

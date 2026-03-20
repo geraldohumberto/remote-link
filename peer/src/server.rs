@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -12,6 +13,12 @@ use crate::input::Injector;
 use crate::protocol::*;
 
 pub async fn run(config: Arc<Config>) {
+    // Inicia registro no relay em background (se configurado)
+    if let Some((relay_host, relay_port)) = config.relay() {
+        let cfg = config.clone();
+        tokio::spawn(relay_register_loop(relay_host, relay_port, cfg));
+    }
+
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l)  => { info!("Servidor escutando em {}", addr); l }
@@ -20,9 +27,8 @@ pub async fn run(config: Arc<Config>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                info!("Conexao de {}", peer);
+                info!("Conexao direta de {}", peer);
                 let cfg = config.clone();
-                // spawn_blocking não é necessário aqui pois handle() usa spawn interno
                 tokio::spawn(handle(stream, cfg));
             }
             Err(e) => {
@@ -33,6 +39,77 @@ pub async fn run(config: Arc<Config>) {
     }
 }
 
+/// Loop que mantém o servidor sempre registrado no relay.
+/// Quando um peer conecta via relay, entrega o stream ao handle().
+/// Após cada sessão (ou falha), re-registra automaticamente.
+async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Config>) {
+    let my_id = format!("{}:{}", config.relay_id_host(), config.port);
+    info!("Relay register loop — ID: {}", my_id);
+
+    loop {
+        match relay_register_once(&relay_host, relay_port, &my_id, config.clone()).await {
+            Ok(()) => {
+                info!("Sessao relay encerrada, re-registrando em 3s...");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            Err(e) => {
+                warn!("Relay falhou: {} — tentando em 30s", e);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    }
+}
+
+async fn relay_register_once(
+    relay_host: &str,
+    relay_port: u16,
+    my_id: &str,
+    config: Arc<Config>,
+) -> anyhow::Result<()> {
+    let relay_addr = format!("{}:{}", relay_host, relay_port);
+
+    let stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        TcpStream::connect(&relay_addr),
+    ).await
+    .map_err(|_| anyhow::anyhow!("Timeout conectando no relay"))?
+    .map_err(|e| anyhow::anyhow!("Erro conectando no relay: {}", e))?;
+
+    stream.set_nodelay(true)?;
+    let (reader, mut writer) = stream.into_split();
+    let mut buf = BufReader::new(reader);
+
+    // Envia registro
+    let reg_msg = serde_json::json!({"action": "register", "id": my_id}).to_string() + "\n";
+    writer.write_all(reg_msg.as_bytes()).await?;
+
+    // Lê confirmação do registro
+    let mut line = String::new();
+    buf.read_line(&mut line).await?;
+    let resp: serde_json::Value = serde_json::from_str(line.trim())?;
+    if resp["ok"].as_bool() != Some(true) {
+        anyhow::bail!("Relay recusou: {}", resp["reason"].as_str().unwrap_or("?"));
+    }
+    info!("Registrado no relay {} com ID '{}'", relay_addr, my_id);
+
+    // Aguarda notificação de peer conectado: {"ok":true,"id":"peer_connected"}
+    line.clear();
+    buf.read_line(&mut line).await?;
+    let notif: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
+
+    if notif["id"].as_str() == Some("peer_connected") {
+        info!("Peer conectou via relay — iniciando sessao");
+        // Reconstrói o TcpStream e entrega ao handle()
+        // A partir daqui o relay faz bridge de bytes — transparente pro protocolo
+        let stream = buf.into_inner().reunite(writer)?;
+        handle(stream, config).await?;
+    } else {
+        warn!("Notificacao inesperada do relay: {}", line.trim());
+    }
+
+    Ok(())
+}
+
 async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     stream.set_nodelay(true)?;
     let (mut reader, writer_raw) = stream.into_split();
@@ -41,7 +118,6 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     // Auth
     match recv_msg(&mut reader).await? {
         Message::Auth { password } if password == config.password => {
-            // Captura info da tela em spawn_blocking (xcap não é Send no Windows)
             let (sw, sh) = tokio::task::spawn_blocking(|| {
                 Capturer::new()
                     .map(|c| c.size())
@@ -62,12 +138,10 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         _ => anyhow::bail!("Protocolo inesperado na auth"),
     }
 
-    // Canal para receber frames do thread de captura
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
     let quality = config.jpeg_quality;
     let fps     = config.fps;
 
-    // Thread dedicado pra captura (resolve o problema Send no Windows)
     let capture_thread = std::thread::spawn(move || {
         let mut cap = match Capturer::new() {
             Ok(c)  => c,
@@ -78,9 +152,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
             let t0 = std::time::Instant::now();
             match cap.capture_jpeg(quality) {
                 Ok(jpeg) => {
-                    if frame_tx.blocking_send(jpeg).is_err() {
-                        break; // receiver dropped — sessao encerrada
-                    }
+                    if frame_tx.blocking_send(jpeg).is_err() { break; }
                 }
                 Err(e) => { warn!("Captura falhou: {}", e); }
             }
@@ -91,13 +163,10 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         }
     });
 
-    // Task que pega frames do channel e envia pro cliente
     let w2 = writer.clone();
     let frame_task = tokio::spawn(async move {
         while let Some(jpeg) = frame_rx.recv().await {
             let size = jpeg.len() as u32;
-            // Não temos w/h atualizados aqui — usamos o tamanho do frame JPEG
-            // (o cliente já sabe o tamanho original da tela via AuthOk)
             if send_msg_bytes(
                 &w2,
                 &Message::FrameInfo { width: 0, height: 0, size },
@@ -108,7 +177,6 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         }
     });
 
-    // Input / controle loop
     let mut inj = match Injector::new() {
         Ok(i)  => i,
         Err(e) => { warn!("Injector falhou: {}", e); anyhow::bail!("Injector: {}", e); }
@@ -141,7 +209,6 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     }
 
     frame_task.abort();
-    // capture_thread vai terminar sozinho quando frame_tx for dropado
     drop(capture_thread);
     Ok(())
 }

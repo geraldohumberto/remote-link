@@ -63,6 +63,7 @@ struct App {
     cfg_folder:    String,
     cfg_relay_host: String,
     cfg_relay_port: String,
+    cfg_relay_id:   String,
     cfg_saved:     bool,
     // info
     local_ip:      String,
@@ -85,6 +86,7 @@ impl App {
         let cfg_folder  = config.shared_folder.clone();
         let cfg_relay_host = config.relay_host.clone();
         let cfg_relay_port = config.relay_port.to_string();
+        let cfg_relay_id   = config.relay_id.clone();
         let host_buf    = config.last_host.clone();
         let port_buf    = config.last_port.to_string();
         let use_relay   = config.use_relay;
@@ -111,7 +113,7 @@ impl App {
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
-            cfg_relay_host, cfg_relay_port, cfg_saved: false,
+            cfg_relay_host, cfg_relay_port, cfg_relay_id, cfg_saved: false,
             local_ip,
         }
     }
@@ -336,6 +338,9 @@ impl App {
                         ui.label(RichText::new("Relay porta").size(11.0).color(Color32::GRAY));
                         ui.add(egui::TextEdit::singleline(&mut self.relay_port).desired_width(70.0).hint_text("7891"));
                         ui.end_row();
+                        ui.label(RichText::new("ID do host remoto").size(11.0).color(Color32::GRAY));
+                        ui.add(egui::TextEdit::singleline(&mut self.config.relay_id).desired_width(f32::INFINITY).hint_text("ex: pc-empresa"));
+                        ui.end_row();
                     });
                 }
 
@@ -537,6 +542,9 @@ impl App {
                 ui.label(RichText::new("Relay porta").size(11.0).color(Color32::GRAY));
                 ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_port).desired_width(70.0).hint_text("7891"));
                 ui.end_row();
+                ui.label(RichText::new("ID deste host no relay").size(11.0).color(Color32::GRAY));
+                ui.add(egui::TextEdit::singleline(&mut self.cfg_relay_id).desired_width(220.0).hint_text("ex: pc-empresa (deixe vazio para usar hostname)"));
+                ui.end_row();
             });
 
             ui.add_space(14.0);
@@ -550,9 +558,11 @@ impl App {
                 self.config.shared_folder = self.cfg_folder.clone();
                 self.config.relay_host    = self.cfg_relay_host.clone();
                 self.config.relay_port    = self.cfg_relay_port.parse().unwrap_or(7891);
+                self.config.relay_id      = self.cfg_relay_id.clone();
                 self.config.save();
                 self.cfg_relay_host = self.config.relay_host.clone();
                 self.relay_host     = self.config.relay_host.clone();
+                self.cfg_relay_id   = self.config.relay_id.clone();
                 self.cfg_saved = true;
             }
             if self.cfg_saved {

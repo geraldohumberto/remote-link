@@ -17,6 +17,10 @@ pub struct Config {
     pub use_relay:           bool,
     pub relay_host:          String,
     pub relay_port:          u16,
+    /// ID único deste host no relay (ex: "pc-empresa", "home-humberto")
+    /// Se vazio, usa relay_host:port como fallback
+    #[serde(default)]
+    pub relay_id:            String,
 }
 
 impl Default for Config {
@@ -38,6 +42,7 @@ impl Default for Config {
             use_relay:           false,
             relay_host:          String::new(),
             relay_port:          DEFAULT_RELAY_PORT,
+            relay_id:            String::new(),
         }
     }
 }
@@ -73,5 +78,28 @@ impl Config {
 
     pub fn shared_path(&self) -> PathBuf {
         PathBuf::from(&self.shared_folder)
+    }
+
+    /// Retorna (relay_host, relay_port) se o relay estiver habilitado e configurado.
+    pub fn relay(&self) -> Option<(String, u16)> {
+        if self.use_relay && !self.relay_host.is_empty() {
+            Some((self.relay_host.clone(), self.relay_port))
+        } else {
+            None
+        }
+    }
+
+    /// ID que identifica este host no relay.
+    /// Se `relay_id` estiver preenchido, usa ele.
+    /// Caso contrário, usa o hostname da máquina.
+    /// O cliente vai usar esse ID para conectar via relay.
+    pub fn relay_id_host(&self) -> String {
+        if !self.relay_id.is_empty() {
+            return self.relay_id.clone();
+        }
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "remotelink-host".to_string())
     }
 }
