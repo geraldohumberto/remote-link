@@ -277,7 +277,7 @@ async fn connect_ws(
     });
 
     // Autenticação — envia via WS
-    let auth_bytes = proto_encode(&Message::Auth { password });
+    let auth_bytes = proto_encode(&Message::Auth { password, monitor_index: None });
     if out_tx.send(auth_bytes).await.is_err() {
         let _ = evt_tx.send(Evt::Error { reason: "Falha ao enviar auth".into() }).await;
         return;

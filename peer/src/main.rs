@@ -341,8 +341,8 @@ impl eframe::App for App {
         // Segunda janela independente
         if self.show_monitor2 {
             let tex2 = self.frame_tex2.clone();
-            let sw2 = self.server_w2;
-            let sh2 = self.server_h2;
+            let _sw2 = self.server_w2;
+            let _sh2 = self.server_h2;
             let next_mon = self.next_monitor_for_secondary();
             let title = format!("RemoteLink — Monitor {}", next_mon + 1);
             ctx.show_viewport_deferred(
