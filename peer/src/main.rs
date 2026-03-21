@@ -110,6 +110,7 @@ impl App {
             server_w: 1920, server_h: 1080, peer_platform: String::new(),
             frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0,
             canvas2: None, canvas2_w: 0, canvas2_h: 0, canvas2_mon: 1,
+            fps_count: 0,
             fps_last: std::time::Instant::now(), fps_display: 0.0,
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),

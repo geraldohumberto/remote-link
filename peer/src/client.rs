@@ -14,6 +14,7 @@ pub enum Cmd {
     FileList,
     FileDownload { filename: String, path: String },
     FileUpload   { src: String },
+    SwitchMonitor { index: u8 },
     Disconnect,
 }
 
@@ -22,6 +23,7 @@ pub enum Evt {
     Connected   { screen_w: u32, screen_h: u32, platform: String },
     Frame       { jpeg: Vec<u8> },
     FrameDelta  { monitor_id: u8, screen_w: u32, screen_h: u32, blocks: Vec<(crate::protocol::BlockInfo, Vec<u8>)> },
+    MonitorList { monitors: Vec<crate::protocol::MonitorInfo> },
     FileList    { folder: String, items: Vec<FileItem> },
     FileDone    { filename: String, bytes: u64 },
     FileError   { reason: String },
@@ -137,6 +139,9 @@ async fn tcp_session(
     let recv_task = tokio::spawn(async move {
         loop {
             match recv_msg(&mut reader).await {
+                Ok(Message::MonitorList { monitors }) => {
+                    let _ = tx2.send(Evt::MonitorList { monitors }).await;
+                }
                 Ok(Message::FrameDelta { monitor_id, screen_w, screen_h, blocks }) => {
                     let mut block_data = Vec::with_capacity(blocks.len());
                     let mut ok = true;
@@ -448,6 +453,9 @@ async fn cmd_loop(mut cmd_rx: mpsc::Receiver<Cmd>, writer: Writer) {
                     }
                     let _ = send_msg(&writer, &Message::FileDone { filename, bytes: filesize }).await;
                 }
+            }
+            Some(Cmd::SwitchMonitor { index }) => {
+                let _ = send_msg(&writer, &Message::SwitchMonitor { index }).await;
             }
             Some(Cmd::Disconnect) | None => {
                 let _ = send_msg(&writer, &Message::Disconnect).await;

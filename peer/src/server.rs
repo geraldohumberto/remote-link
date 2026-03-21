@@ -120,7 +120,6 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     let quality = config.jpeg_quality;
     let fps     = config.fps;
     let monitor_list = Capturer::list_monitors();
-    let monitor_count = monitor_list.len();
 
     // Spawna uma thread de captura por monitor
     let mut capture_threads = Vec::new();
