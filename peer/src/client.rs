@@ -363,6 +363,9 @@ async fn ws_cmd_loop(mut cmd_rx: mpsc::Receiver<Cmd>, out_tx: mpsc::Sender<Vec<u
                     let _ = out_tx.send(proto_encode(&Message::FileDone { filename, bytes: filesize })).await;
                 }
             }
+            Some(Cmd::SwitchMonitor { index }) => {
+                let _ = out_tx.send(proto_encode(&Message::SwitchMonitor { index })).await;
+            }
             Some(Cmd::Disconnect) | None => {
                 let _ = out_tx.send(proto_encode(&Message::Disconnect)).await;
                 break;

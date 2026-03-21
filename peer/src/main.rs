@@ -64,6 +64,8 @@ struct App {
     // monitores remotos
     monitors:      Vec<protocol::MonitorInfo>,
     active_monitor: u8,
+    // info
+    local_ip:      String,
     drag_status:   String,
 }
 
@@ -239,7 +241,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
 
         // Redimensiona janela conforme tela
