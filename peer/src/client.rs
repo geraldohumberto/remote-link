@@ -14,7 +14,7 @@ pub enum Cmd {
     FileList,
     FileDownload { filename: String, path: String },
     FileUpload   { src: String },
-    SwitchMonitor { index: u8 },
+    SwitchMonitor  { index: u8 },
     Disconnect,
 }
 
@@ -38,6 +38,7 @@ pub async fn connect(
     password: String,
     relay: Option<(String, u16)>,
     relay_id: String,
+    monitor_index: Option<u8>,
     mut cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
@@ -61,7 +62,7 @@ pub async fn connect(
             match tcp_relay(&rhost, rport, &relay_id).await {
                 Ok(stream) => {
                     stream.set_nodelay(true).ok();
-                    tcp_session(stream, password, cmd_rx, evt_tx).await;
+                    tcp_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
                 }
                 Err(e) => {
                     let _ = evt_tx.send(Evt::Error {
@@ -106,20 +107,21 @@ pub async fn connect(
     };
 
     stream.set_nodelay(true).ok();
-    tcp_session(stream, password, cmd_rx, evt_tx).await;
+    tcp_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
 }
 
 // ── Sessão TCP direta ────────────────────────────────────────────────────
 async fn tcp_session(
     stream: TcpStream,
     password: String,
+    monitor_index: Option<u8>,
     cmd_rx: mpsc::Receiver<Cmd>,
     evt_tx: mpsc::Sender<Evt>,
 ) {
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
-    if send_msg(&writer, &Message::Auth { password }).await.is_err() { return; }
+    if send_msg(&writer, &Message::Auth { password, monitor_index }).await.is_err() { return; }
 
     match recv_msg(&mut reader).await {
         Ok(Message::AuthOk { screen_w, screen_h, platform, .. }) => {

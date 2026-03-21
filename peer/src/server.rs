@@ -92,11 +92,12 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
-    // Auth
-    match recv_msg(&mut reader).await? {
-        Message::Auth { password } if password == config.password => {
-            let (sw, sh) = tokio::task::spawn_blocking(|| {
-                Capturer::new().map(|c| c.size()).unwrap_or((1920, 1080))
+    // Auth — cliente pode pedir um monitor específico via monitor_index
+    let monitor_idx = match recv_msg(&mut reader).await? {
+        Message::Auth { password, monitor_index } if password == config.password => {
+            let idx = monitor_index.unwrap_or(0) as usize;
+            let (sw, sh) = tokio::task::spawn_blocking(move || {
+                Capturer::new_with_index(idx).map(|c| c.size()).unwrap_or((1920, 1080))
             }).await?;
             send_msg(&writer, &Message::AuthOk {
                 screen_w: sw, screen_h: sh,
@@ -105,65 +106,50 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
             }).await?;
             let monitors = Capturer::list_monitors();
             send_msg(&writer, &Message::MonitorList { monitors }).await?;
+            monitor_index.unwrap_or(0) as usize
         }
         Message::Auth { .. } => {
             send_msg(&writer, &Message::AuthFail { reason: "Senha incorreta".into() }).await?;
             anyhow::bail!("Senha errada");
         }
         _ => anyhow::bail!("Protocolo inesperado na auth"),
-    }
+    };
 
-    // Canal unificado: (monitor_id, screen_w, screen_h, blocos)
-    type DeltaMsg = (u8, u32, u32, Vec<(crate::protocol::BlockInfo, Vec<u8>)>);
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<DeltaMsg>(8);
-
+    type DeltaMsg = (u32, u32, Vec<(crate::protocol::BlockInfo, Vec<u8>)>);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<DeltaMsg>(2);
+    let (switch_tx, switch_rx)   = std::sync::mpsc::channel::<usize>();
     let quality = config.jpeg_quality;
     let fps     = config.fps;
-    let monitor_list = Capturer::list_monitors();
 
-    // Spawna uma thread de captura por monitor
-    let mut capture_threads = Vec::new();
-    let mut switch_txs: Vec<std::sync::mpsc::Sender<usize>> = Vec::new();
-
-    for mon in &monitor_list {
-        let mon_idx   = mon.index as usize;
-        let mon_id    = mon.index;
-        let ftx       = frame_tx.clone();
-        let (stx, srx) = std::sync::mpsc::channel::<usize>();
-        switch_txs.push(stx);
-
-        let t = std::thread::spawn(move || {
-            let mut cap = match Capturer::new_with_index(mon_idx) {
-                Ok(c)  => c,
-                Err(e) => { warn!("Capturer monitor {} falhou: {}", mon_idx, e); return; }
-            };
-            let interval_ms = std::time::Duration::from_millis(1000 / fps);
-            loop {
-                // switch não se aplica aqui — cada thread tem seu monitor fixo
-                let _ = srx.try_recv();
-                let t0 = std::time::Instant::now();
-                match cap.capture_delta(quality) {
-                    Ok(Some(delta)) => {
-                        if ftx.blocking_send((mon_id, delta.0, delta.1, delta.2)).is_err() { break; }
-                    }
-                    Ok(None) => {}
-                    Err(e) => { warn!("Captura monitor {} falhou: {}", mon_idx, e); }
-                }
-                let elapsed = t0.elapsed();
-                if elapsed < interval_ms { std::thread::sleep(interval_ms - elapsed); }
+    let capture_thread = std::thread::spawn(move || {
+        let mut cap = match Capturer::new_with_index(monitor_idx) {
+            Ok(c)  => c,
+            Err(e) => { warn!("Capturer falhou: {}", e); return; }
+        };
+        let interval_ms = std::time::Duration::from_millis(1000 / fps);
+        loop {
+            if let Ok(idx) = switch_rx.try_recv() {
+                let _ = cap.switch_monitor(idx);
             }
-        });
-        capture_threads.push(t);
-    }
-    drop(frame_tx); // remove o sender original, só os clones das threads ficam vivos
+            let t0 = std::time::Instant::now();
+            match cap.capture_delta(quality) {
+                Ok(Some(delta)) => {
+                    if frame_tx.blocking_send(delta).is_err() { break; }
+                }
+                Ok(None) => {}
+                Err(e) => { warn!("Captura falhou: {}", e); }
+            }
+            let elapsed = t0.elapsed();
+            if elapsed < interval_ms { std::thread::sleep(interval_ms - elapsed); }
+        }
+    });
 
-    // Task que envia frames pro cliente com monitor_id
     let w2 = writer.clone();
     let frame_task = tokio::spawn(async move {
-        while let Some((mon_id, sw, sh, blocks)) = frame_rx.recv().await {
+        while let Some((sw, sh, blocks)) = frame_rx.recv().await {
             let block_infos: Vec<crate::protocol::BlockInfo> = blocks.iter().map(|(b,_)| b.clone()).collect();
             if send_msg(&w2, &Message::FrameDelta {
-                monitor_id: mon_id, screen_w: sw, screen_h: sh, blocks: block_infos,
+                monitor_id: 0, screen_w: sw, screen_h: sh, blocks: block_infos,
             }).await.is_err() { break; }
             for (_, jpeg) in &blocks {
                 let mut g = w2.lock().await;
@@ -180,10 +166,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     loop {
         match recv_msg(&mut reader).await? {
             Message::Input(ev) => { let _ = inj.inject(&ev); }
-            Message::SwitchMonitor { .. } => {
-                // Com multimonitor, SwitchMonitor não é mais necessário
-                // mas mantemos para compatibilidade
-            }
+            Message::SwitchMonitor { index } => { let _ = switch_tx.send(index as usize); }
             Message::Clipboard { text } => {
                 if let Ok(mut c) = arboard::Clipboard::new() { let _ = c.set_text(text); }
             }
@@ -208,6 +191,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     }
 
     frame_task.abort();
+    drop(capture_thread);
     Ok(())
 }
 

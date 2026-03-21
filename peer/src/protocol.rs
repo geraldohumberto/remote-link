@@ -27,7 +27,7 @@ pub struct MonitorInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum Message {
-    Auth        { password: String },
+    Auth        { password: String, monitor_index: Option<u8> },
     AuthOk      { screen_w: u32, screen_h: u32, platform: String, peer_id: String },
     AuthFail    { reason: String },
     FrameInfo   { width: u32, height: u32, size: u32 },

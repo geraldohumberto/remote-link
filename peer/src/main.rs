@@ -24,7 +24,7 @@ enum Screen { FirstRun, Main, Remote, Files, Settings }
 struct App {
     config:        Config,
     screen:        Screen,
-    last_screen:   Screen,  // para detectar mudança e redimensionar
+    last_screen:   Screen,
     rt:            Arc<Runtime>,
     // first run
     fr_pass1:      String,
@@ -34,22 +34,27 @@ struct App {
     pass_buf:      String,
     conn_error:    String,
     connecting:    bool,
-    // session
+    // sessão principal
     cmd_tx:        Option<mpsc::Sender<Cmd>>,
     evt_rx:        Option<mpsc::Receiver<Evt>>,
     server_w:      u32,
     server_h:      u32,
     peer_platform: String,
-    // frame
+    // sessão secundária (monitor 2)
+    cmd_tx2:       Option<mpsc::Sender<Cmd>>,
+    evt_rx2:       Option<mpsc::Receiver<Evt>>,
+    server_w2:     u32,
+    server_h2:     u32,
+    // frame principal
     frame_tex:     Option<egui::TextureHandle>,
     canvas:        Option<Vec<u8>>,
     canvas_w:      u32,
     canvas_h:      u32,
-    // canvas do monitor extra (monitor_id != 0)
+    // frame segunda janela
+    frame_tex2:    Option<egui::TextureHandle>,
     canvas2:       Option<Vec<u8>>,
     canvas2_w:     u32,
     canvas2_h:     u32,
-    canvas2_mon:   u8,   // qual monitor_id está no canvas2
     fps_count:     u32,
     fps_last:      std::time::Instant,
     fps_display:   f32,
@@ -70,7 +75,7 @@ struct App {
     // monitores remotos
     monitors:       Vec<protocol::MonitorInfo>,
     active_monitor: u8,
-    show_monitor2:  bool,  // controla se a segunda janela está aberta
+    show_monitor2:  bool,
     // info
     local_ip:      String,
     drag_status:   String,
@@ -108,21 +113,21 @@ impl App {
             conn_error: String::new(), connecting: false,
             cmd_tx: None, evt_rx: None,
             server_w: 1920, server_h: 1080, peer_platform: String::new(),
+            cmd_tx2: None, evt_rx2: None, server_w2: 1920, server_h2: 1080,
             frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0,
-            canvas2: None, canvas2_w: 0, canvas2_h: 0, canvas2_mon: 1,
-            fps_count: 0,
-            fps_last: std::time::Instant::now(), fps_display: 0.0,
+            frame_tex2: None, canvas2: None, canvas2_w: 0, canvas2_h: 0,
+            fps_count: 0, fps_last: std::time::Instant::now(), fps_display: 0.0,
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
             monitors: Vec::new(), active_monitor: 0, show_monitor2: false,
-            local_ip,
-            drag_status: String::new(),
+            local_ip, drag_status: String::new(),
         }
     }
 
     fn poll_events(&mut self, ctx: &egui::Context) {
+        // Sessão principal
         let events: Vec<Evt> = {
             let Some(rx) = self.evt_rx.as_mut() else { return };
             let mut evs = Vec::new();
@@ -131,9 +136,7 @@ impl App {
         };
         for evt in events {
             match evt {
-                Evt::MonitorList { monitors } => {
-                    self.monitors = monitors;
-                }
+                Evt::MonitorList { monitors } => { self.monitors = monitors; }
                 Evt::Connected { screen_w, screen_h, platform } => {
                     self.server_w = screen_w; self.server_h = screen_h;
                     self.peer_platform = platform;
@@ -141,77 +144,10 @@ impl App {
                     self.conn_error = String::new(); self.connecting = false;
                 }
                 Evt::Frame { jpeg } => {
-                    if let Ok(img) = image::load_from_memory(&jpeg) {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width(), rgba.height());
-                        self.canvas = Some(rgba.into_raw());
-                        self.canvas_w = w; self.canvas_h = h;
-                        let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize],
-                            self.canvas.as_ref().unwrap());
-                        self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
-                    }
-                    self.fps_count += 1;
-                    let elapsed = self.fps_last.elapsed().as_secs_f32();
-                    if elapsed >= 1.0 {
-                        self.fps_display = self.fps_count as f32 / elapsed;
-                        self.fps_count = 0; self.fps_last = std::time::Instant::now();
-                    }
-                    ctx.request_repaint();
+                    self.update_canvas_from_jpeg(&jpeg, ctx, false);
                 }
-                Evt::FrameDelta { monitor_id, screen_w, screen_h, blocks } => {
-                    // Escolhe qual canvas atualizar
-                    let is_main = monitor_id == self.active_monitor;
-                    if is_main {
-                        // Canvas principal
-                        if self.canvas.is_none() || self.canvas_w != screen_w || self.canvas_h != screen_h {
-                            self.canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
-                            self.canvas_w = screen_w; self.canvas_h = screen_h;
-                        }
-                        let canvas = self.canvas.as_mut().unwrap();
-                        for (block, jpeg) in &blocks {
-                            if let Ok(img) = image::load_from_memory(jpeg) {
-                                let rgba = img.to_rgba8();
-                                for y in 0..block.h { for x in 0..block.w {
-                                    let px = rgba.get_pixel(x, y);
-                                    let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
-                                    if idx + 3 < canvas.len() {
-                                        canvas[idx] = px[0]; canvas[idx+1] = px[1];
-                                        canvas[idx+2] = px[2]; canvas[idx+3] = px[3];
-                                    }
-                                }}
-                            }
-                        }
-                        let ci = egui::ColorImage::from_rgba_unmultiplied([screen_w as usize, screen_h as usize], canvas);
-                        self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
-                    } else if self.show_monitor2 {
-                        // Canvas da segunda janela
-                        self.canvas2_mon = monitor_id;
-                        if self.canvas2.is_none() || self.canvas2_w != screen_w || self.canvas2_h != screen_h {
-                            self.canvas2 = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
-                            self.canvas2_w = screen_w; self.canvas2_h = screen_h;
-                        }
-                        let canvas = self.canvas2.as_mut().unwrap();
-                        for (block, jpeg) in &blocks {
-                            if let Ok(img) = image::load_from_memory(jpeg) {
-                                let rgba = img.to_rgba8();
-                                for y in 0..block.h { for x in 0..block.w {
-                                    let px = rgba.get_pixel(x, y);
-                                    let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
-                                    if idx + 3 < canvas.len() {
-                                        canvas[idx] = px[0]; canvas[idx+1] = px[1];
-                                        canvas[idx+2] = px[2]; canvas[idx+3] = px[3];
-                                    }
-                                }}
-                            }
-                        }
-                    }
-                    self.fps_count += 1;
-                    let elapsed = self.fps_last.elapsed().as_secs_f32();
-                    if elapsed >= 1.0 {
-                        self.fps_display = self.fps_count as f32 / elapsed;
-                        self.fps_count = 0; self.fps_last = std::time::Instant::now();
-                    }
-                    ctx.request_repaint();
+                Evt::FrameDelta { screen_w, screen_h, blocks, .. } => {
+                    self.apply_delta(screen_w, screen_h, &blocks, ctx, false);
                 }
                 Evt::FileList { folder, items } => {
                     self.file_folder = folder; self.file_items = items; self.file_status = String::new();
@@ -228,24 +164,121 @@ impl App {
                     self.screen = Screen::Main; self.cmd_tx = None; self.evt_rx = None;
                 }
                 Evt::Disconnected => {
-                    self.screen = Screen::Main; self.cmd_tx = None;
-                    self.evt_rx = None; self.frame_tex = None;
-                    self.monitors = Vec::new(); self.active_monitor = 0;
+                    self.screen = Screen::Main; self.cmd_tx = None; self.evt_rx = None;
+                    self.frame_tex = None; self.monitors = Vec::new(); self.active_monitor = 0;
                     self.show_monitor2 = false;
+                    self.cmd_tx2 = None; self.evt_rx2 = None; self.frame_tex2 = None;
                     self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
                 }
             }
         }
+
+        // Sessão secundária
+        let events2: Vec<Evt> = {
+            let Some(rx) = self.evt_rx2.as_mut() else { return };
+            let mut evs = Vec::new();
+            while let Ok(e) = rx.try_recv() { evs.push(e); }
+            evs
+        };
+        for evt in events2 {
+            match evt {
+                Evt::Connected { screen_w, screen_h, .. } => {
+                    self.server_w2 = screen_w; self.server_h2 = screen_h;
+                }
+                Evt::Frame { jpeg } => {
+                    self.update_canvas_from_jpeg(&jpeg, ctx, true);
+                }
+                Evt::FrameDelta { screen_w, screen_h, blocks, .. } => {
+                    self.apply_delta(screen_w, screen_h, &blocks, ctx, true);
+                }
+                Evt::Disconnected | Evt::Error { .. } => {
+                    self.cmd_tx2 = None; self.evt_rx2 = None;
+                    self.frame_tex2 = None; self.show_monitor2 = false;
+                    self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn update_canvas_from_jpeg(&mut self, jpeg: &[u8], ctx: &egui::Context, secondary: bool) {
+        if let Ok(img) = image::load_from_memory(jpeg) {
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let data = rgba.into_raw();
+            if secondary {
+                self.canvas2 = Some(data.clone());
+                self.canvas2_w = w; self.canvas2_h = h;
+                let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &data);
+                self.frame_tex2 = Some(ctx.load_texture("frame2", ci, egui::TextureOptions::LINEAR));
+            } else {
+                self.canvas = Some(data.clone());
+                self.canvas_w = w; self.canvas_h = h;
+                let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &data);
+                self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
+            }
+        }
+        self.tick_fps(ctx);
+    }
+
+    fn apply_delta(&mut self, screen_w: u32, screen_h: u32,
+        blocks: &[(protocol::BlockInfo, Vec<u8>)], ctx: &egui::Context, secondary: bool)
+    {
+        let (canvas, cw, ch, tex_name) = if secondary {
+            (&mut self.canvas2, &mut self.canvas2_w, &mut self.canvas2_h, "frame2")
+        } else {
+            (&mut self.canvas, &mut self.canvas_w, &mut self.canvas_h, "frame")
+        };
+
+        if canvas.is_none() || *cw != screen_w || *ch != screen_h {
+            *canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
+            *cw = screen_w; *ch = screen_h;
+        }
+        let buf = canvas.as_mut().unwrap();
+        for (block, jpeg) in blocks {
+            if let Ok(img) = image::load_from_memory(jpeg) {
+                let rgba = img.to_rgba8();
+                for y in 0..block.h { for x in 0..block.w {
+                    let px = rgba.get_pixel(x, y);
+                    let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
+                    if idx + 3 < buf.len() {
+                        buf[idx] = px[0]; buf[idx+1] = px[1];
+                        buf[idx+2] = px[2]; buf[idx+3] = px[3];
+                    }
+                }}
+            }
+        }
+        let ci = egui::ColorImage::from_rgba_unmultiplied([screen_w as usize, screen_h as usize], buf);
+        let tex = ctx.load_texture(tex_name, ci, egui::TextureOptions::LINEAR);
+        if secondary { self.frame_tex2 = Some(tex); } else { self.frame_tex = Some(tex); }
+        self.tick_fps(ctx);
+    }
+
+    fn tick_fps(&mut self, ctx: &egui::Context) {
+        self.fps_count += 1;
+        let elapsed = self.fps_last.elapsed().as_secs_f32();
+        if elapsed >= 1.0 {
+            self.fps_display = self.fps_count as f32 / elapsed;
+            self.fps_count = 0; self.fps_last = std::time::Instant::now();
+        }
+        ctx.request_repaint();
     }
 
     fn send_cmd(&self, cmd: Cmd) {
         if let Some(tx) = &self.cmd_tx { let _ = tx.try_send(cmd); }
     }
 
+    fn send_cmd2(&self, cmd: Cmd) {
+        if let Some(tx) = &self.cmd_tx2 { let _ = tx.try_send(cmd); }
+    }
+
     fn do_connect(&mut self) {
+        self.do_connect_monitor(None);
+    }
+
+    fn do_connect_monitor(&mut self, monitor_index: Option<u8>) {
         let remote_id = self.config.remote_id.trim().to_string();
         let pass = if self.pass_buf.is_empty() { self.config.password.clone() } else { self.pass_buf.clone() };
-
         let relay = if self.config.use_relay && !self.config.relay_host.trim().is_empty() {
             Some((self.config.relay_host.trim().to_string(), self.config.relay_port))
         } else {
@@ -254,19 +287,39 @@ impl App {
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<Evt>(256);
-        self.cmd_tx = Some(cmd_tx); self.evt_rx = Some(evt_rx);
-        self.connecting = true; self.conn_error = String::new();
-        self.config.save();
+
+        if monitor_index.is_none() {
+            // Conexão principal
+            self.cmd_tx = Some(cmd_tx); self.evt_rx = Some(evt_rx);
+            self.connecting = true; self.conn_error = String::new();
+            self.config.save();
+        } else {
+            // Conexão secundária
+            self.cmd_tx2 = Some(cmd_tx); self.evt_rx2 = Some(evt_rx);
+        }
+
         let host = String::new();
         let port = self.config.port;
-        self.rt.spawn(client::connect(host, port, pass, relay, remote_id, cmd_rx, evt_tx));
+        self.rt.spawn(client::connect(host, port, pass, relay, remote_id, monitor_index, cmd_rx, evt_tx));
     }
 
     fn disconnect(&mut self) {
         self.send_cmd(Cmd::Disconnect);
+        self.send_cmd2(Cmd::Disconnect);
         self.cmd_tx = None; self.evt_rx = None;
-        self.screen = Screen::Main; self.frame_tex = None;
+        self.cmd_tx2 = None; self.evt_rx2 = None;
+        self.screen = Screen::Main; self.frame_tex = None; self.frame_tex2 = None;
         self.show_monitor2 = false;
+        self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
+    }
+
+    fn next_monitor_for_secondary(&self) -> u8 {
+        // Pega o menor monitor_id que não é o ativo
+        self.monitors.iter()
+            .filter(|m| m.index != self.active_monitor)
+            .map(|m| m.index)
+            .min()
+            .unwrap_or(1)
     }
 }
 
@@ -285,20 +338,13 @@ impl eframe::App for App {
             self.last_screen = self.screen.clone();
         }
 
-        // Segunda janela de monitor — mantida viva todo frame enquanto show_monitor2 = true
+        // Segunda janela independente
         if self.show_monitor2 {
-            let next_idx = if self.monitors.len() > 1 {
-                // Pega o próximo monitor que não é o ativo
-                self.monitors.iter()
-                    .find(|m| m.index != self.active_monitor)
-                    .map(|m| m.index)
-                    .unwrap_or(1)
-            } else { 1 };
-            let title = format!("RemoteLink — Monitor {}", next_idx + 1);
-            // Clona canvas2 para passar para o closure
-            let canvas2_data = self.canvas2.clone();
-            let w2 = self.canvas2_w;
-            let h2 = self.canvas2_h;
+            let tex2 = self.frame_tex2.clone();
+            let sw2 = self.server_w2;
+            let sh2 = self.server_h2;
+            let next_mon = self.next_monitor_for_secondary();
+            let title = format!("RemoteLink — Monitor {}", next_mon + 1);
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("monitor2"),
                 egui::ViewportBuilder::default()
@@ -306,19 +352,11 @@ impl eframe::App for App {
                     .with_inner_size([900.0, 600.0]),
                 move |ctx, _class| {
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::BLACK)).show(ctx, |ui| {
-                        if let Some(ref data) = canvas2_data {
-                            if w2 > 0 && h2 > 0 {
-                                let ci = egui::ColorImage::from_rgba_unmultiplied([w2 as usize, h2 as usize], data);
-                                let tex = ctx.load_texture("frame2", ci, egui::TextureOptions::LINEAR);
-                                ui.add(egui::Image::new(&tex).fit_to_exact_size(ui.available_size()));
-                            } else {
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(RichText::new("Aguardando frames do monitor...").color(Color32::GRAY).size(13.0));
-                                });
-                            }
+                        if let Some(tex) = &tex2 {
+                            ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()));
                         } else {
                             ui.centered_and_justified(|ui| {
-                                ui.label(RichText::new(format!("Monitor {} — aguardando...", next_idx + 1)).color(Color32::GRAY).size(13.0));
+                                ui.label(RichText::new("Aguardando frames...").color(Color32::GRAY).size(13.0));
                             });
                         }
                     });
@@ -362,7 +400,10 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { self.send_cmd(Cmd::Disconnect); }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.send_cmd(Cmd::Disconnect);
+        self.send_cmd2(Cmd::Disconnect);
+    }
 }
 
 impl App {
@@ -511,7 +552,7 @@ impl App {
                         for k in &["delete","alt","ctrl"] { self.send_cmd(Cmd::Input(InputEvent::KeyUp   { key: k.to_string() })); }
                     }
 
-                    // Ícones de monitor
+                    // Ícones de monitor numerados — troca na mesma sessão
                     if self.monitors.len() > 1 {
                         ui.separator();
                         for m in self.monitors.clone() {
@@ -525,12 +566,24 @@ impl App {
                                 self.send_cmd(Cmd::SwitchMonitor { index: m.index });
                             }
                         }
-                        // Botão monitor+ — toggle segunda janela
+                        // Botão monitor+ — abre segunda conexão independente
                         let mon2_color = if self.show_monitor2 { Color32::from_rgb(0,212,255) } else { Color32::GRAY };
                         if ui.add(egui::Button::new(RichText::new("🖥+").color(mon2_color).size(11.0))
                             .frame(self.show_monitor2)).clicked()
                         {
-                            self.show_monitor2 = !self.show_monitor2;
+                            if self.show_monitor2 {
+                                // Fecha segunda janela
+                                self.show_monitor2 = false;
+                                self.send_cmd2(Cmd::Disconnect);
+                                self.cmd_tx2 = None; self.evt_rx2 = None;
+                                self.frame_tex2 = None;
+                                self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
+                            } else {
+                                // Abre segunda janela com nova conexão
+                                let next_mon = self.next_monitor_for_secondary();
+                                self.show_monitor2 = true;
+                                self.do_connect_monitor(Some(next_mon));
+                            }
                         }
                     }
 
@@ -717,9 +770,7 @@ impl App {
                 } else {
                     RichText::new("○ Inativo").color(Color32::DARK_GRAY).size(11.0)
                 };
-                if ui.button(label).clicked() {
-                    self.config.use_relay = !self.config.use_relay;
-                }
+                if ui.button(label).clicked() { self.config.use_relay = !self.config.use_relay; }
             });
             if self.config.use_relay {
                 ui.add_space(6.0);
@@ -763,7 +814,6 @@ impl App {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────
 fn get_local_ip() -> String {
     use std::net::UdpSocket;
     UdpSocket::bind("0.0.0.0:0")
