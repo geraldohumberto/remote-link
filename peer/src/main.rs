@@ -79,6 +79,7 @@ struct App {
     // info
     local_ip:      String,
     drag_status:   String,
+    is_secondary:  bool,  // true quando aberto via --connect (processo filho)
 }
 
 impl App {
@@ -122,7 +123,7 @@ impl App {
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
             monitors: Vec::new(), active_monitor: 0, show_monitor2: false,
-            local_ip, drag_status: String::new(),
+            local_ip, drag_status: String::new(), is_secondary: false,
         }
     }
 
@@ -341,32 +342,6 @@ impl eframe::App for App {
             self.last_screen = self.screen.clone();
         }
 
-        // Segunda janela independente
-        if self.show_monitor2 {
-            let tex2 = self.frame_tex2.clone();
-            let _sw2 = self.server_w2;
-            let _sh2 = self.server_h2;
-            let next_mon = self.next_monitor_for_secondary();
-            let title = format!("RemoteLink — Monitor {}", next_mon + 1);
-            ctx.show_viewport_deferred(
-                egui::ViewportId::from_hash_of("monitor2"),
-                egui::ViewportBuilder::default()
-                    .with_title(&title)
-                    .with_inner_size([900.0, 600.0]),
-                move |ctx, _class| {
-                    egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::BLACK)).show(ctx, |ui| {
-                        if let Some(tex) = &tex2 {
-                            ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()));
-                        } else {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(RichText::new("Aguardando frames...").color(Color32::GRAY).size(13.0));
-                            });
-                        }
-                    });
-                },
-            );
-        }
-
         // Drag and drop
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
@@ -578,17 +553,23 @@ impl App {
                             .frame(self.show_monitor2)).clicked()
                         {
                             if self.show_monitor2 {
-                                // Fecha segunda janela
                                 self.show_monitor2 = false;
                                 self.send_cmd2(Cmd::Disconnect);
                                 self.cmd_tx2 = None; self.evt_rx2 = None;
                                 self.frame_tex2 = None;
                                 self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
                             } else {
-                                // Abre segunda janela com nova conexão
                                 let next_mon = self.next_monitor_for_secondary();
+                                // Spawna novo processo independente
+                                let exe = std::env::current_exe().unwrap_or_default();
+                                let remote_id = self.config.remote_id.trim().to_string();
+                                let _ = std::process::Command::new(&exe)
+                                    .arg("--connect")
+                                    .arg(&remote_id)
+                                    .arg("--monitor")
+                                    .arg(next_mon.to_string())
+                                    .spawn();
                                 self.show_monitor2 = true;
-                                self.do_connect_monitor(Some(next_mon));
                             }
                         }
                     }
@@ -855,6 +836,22 @@ fn egui_key_str(key: egui::Key) -> Option<String> {
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt().with_env_filter("remote_link=info").init();
+
+    // Parsing de argumentos de linha de comando
+    // Uso: remote-link.exe --connect ID --monitor N
+    let args: Vec<String> = std::env::args().collect();
+    let mut auto_connect_id: Option<String> = None;
+    let mut auto_monitor: Option<u8> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--connect" => { i += 1; if i < args.len() { auto_connect_id = Some(args[i].clone()); } }
+            "--monitor" => { i += 1; if i < args.len() { auto_monitor = args[i].parse().ok(); } }
+            _ => {}
+        }
+        i += 1;
+    }
+
     let icon = egui::IconData {
         rgba:   icon::ICON_RGBA.to_vec(),
         width:  icon::ICON_WIDTH,
@@ -868,5 +865,15 @@ fn main() -> eframe::Result<()> {
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
-    eframe::run_native("RemoteLink", options, Box::new(|cc| Box::new(App::new(cc))))
+    eframe::run_native("RemoteLink", options, Box::new(|cc| {
+        let mut app = App::new(cc);
+        // Se recebeu --connect, conecta automaticamente ao monitor especificado
+        if let Some(id) = auto_connect_id {
+            app.config.remote_id = id.clone();
+            app.do_connect_monitor(auto_monitor);
+            // Marca que é uma janela secundária para não registrar relay duplo
+            app.is_secondary = true;
+        }
+        Box::new(app)
+    }))
 }
