@@ -24,6 +24,7 @@ enum Screen { FirstRun, Main, Remote, Files, Settings }
 struct App {
     config:        Config,
     screen:        Screen,
+    last_screen:   Screen,  // para detectar mudança e redimensionar
     rt:            Arc<Runtime>,
     // first run
     fr_pass1:      String,
@@ -41,7 +42,7 @@ struct App {
     peer_platform: String,
     // frame
     frame_tex:     Option<egui::TextureHandle>,
-    canvas:        Option<Vec<u8>>,   // buffer RGBA da tela completa
+    canvas:        Option<Vec<u8>>,
     canvas_w:      u32,
     canvas_h:      u32,
     fps_count:     u32,
@@ -62,8 +63,9 @@ struct App {
     cfg_relay_port: String,
     cfg_saved:     bool,
     // monitores remotos
-    monitors:      Vec<protocol::MonitorInfo>,
+    monitors:       Vec<protocol::MonitorInfo>,
     active_monitor: u8,
+    show_monitor2:  bool,  // controla se a segunda janela está aberta
     // info
     local_ip:      String,
     drag_status:   String,
@@ -95,7 +97,7 @@ impl App {
         }
 
         Self {
-            config, screen, rt,
+            config, screen: screen.clone(), last_screen: screen, rt,
             fr_pass1: String::new(), fr_pass2: String::new(), fr_error: String::new(),
             pass_buf: String::new(),
             conn_error: String::new(), connecting: false,
@@ -107,9 +109,9 @@ impl App {
             file_selected: None, file_status: String::new(),
             cfg_pass, cfg_port, cfg_fps, cfg_quality, cfg_folder,
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
+            monitors: Vec::new(), active_monitor: 0, show_monitor2: false,
             local_ip,
             drag_status: String::new(),
-            monitors: Vec::new(), active_monitor: 0,
         }
     }
 
@@ -150,13 +152,11 @@ impl App {
                     ctx.request_repaint();
                 }
                 Evt::FrameDelta { screen_w, screen_h, blocks } => {
-                    // Inicializa canvas se necessário
                     if self.canvas.is_none() || self.canvas_w != screen_w || self.canvas_h != screen_h {
                         self.canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
                         self.canvas_w = screen_w; self.canvas_h = screen_h;
                     }
                     let canvas = self.canvas.as_mut().unwrap();
-                    // Aplica cada bloco no canvas
                     for (block, jpeg) in &blocks {
                         if let Ok(img) = image::load_from_memory(jpeg) {
                             let rgba = img.to_rgba8();
@@ -203,6 +203,7 @@ impl App {
                     self.screen = Screen::Main; self.cmd_tx = None;
                     self.evt_rx = None; self.frame_tex = None;
                     self.monitors = Vec::new(); self.active_monitor = 0;
+                    self.show_monitor2 = false;
                 }
             }
         }
@@ -227,7 +228,6 @@ impl App {
         self.cmd_tx = Some(cmd_tx); self.evt_rx = Some(evt_rx);
         self.connecting = true; self.conn_error = String::new();
         self.config.save();
-        // host e port não são mais usados na conexão via relay — passa vazio
         let host = String::new();
         let port = self.config.port;
         self.rt.spawn(client::connect(host, port, pass, relay, remote_id, cmd_rx, evt_tx));
@@ -237,6 +237,7 @@ impl App {
         self.send_cmd(Cmd::Disconnect);
         self.cmd_tx = None; self.evt_rx = None;
         self.screen = Screen::Main; self.frame_tex = None;
+        self.show_monitor2 = false;
     }
 }
 
@@ -244,15 +245,44 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
 
-        // Redimensiona janela conforme tela
-        let target_size = match self.screen {
-            Screen::Settings => Vec2::new(460.0, 500.0),
-            Screen::Remote | Screen::Files => Vec2::new(900.0, 600.0),
-            _ => Vec2::new(420.0, 310.0),
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_size));
+        // Redimensiona janela APENAS quando a tela muda
+        if self.screen != self.last_screen {
+            let target_size = match self.screen {
+                Screen::Settings => Vec2::new(460.0, 500.0),
+                Screen::Remote | Screen::Files => Vec2::new(900.0, 600.0),
+                _ => Vec2::new(420.0, 310.0),
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_size));
+            self.last_screen = self.screen.clone();
+        }
 
-        // Drag and drop — funciona em qualquer tela
+        // Segunda janela de monitor — mantida viva todo frame enquanto show_monitor2 = true
+        if self.show_monitor2 {
+            let next_idx = (self.active_monitor as usize + 1) % self.monitors.len().max(1);
+            let title = format!("RemoteLink — Monitor {}", next_idx + 1);
+            ctx.show_viewport_deferred(
+                egui::ViewportId::from_hash_of("monitor2"),
+                egui::ViewportBuilder::default()
+                    .with_title(&title)
+                    .with_inner_size([900.0, 600.0]),
+                move |ctx, _class| {
+                    // Fecha a janela se o X for clicado
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        // será tratado no próximo frame via show_monitor2 = false
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(RichText::new(format!(
+                                "Monitor {} — clique em 🖥{} na barra principal para trocar",
+                                next_idx + 1, next_idx + 1))
+                                .color(Color32::GRAY).size(13.0));
+                        });
+                    });
+                },
+            );
+        }
+
+        // Drag and drop
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = &file.path {
@@ -266,14 +296,12 @@ impl eframe::App for App {
                 }
             }
         }
-        // Feedback visual de arquivo sendo arrastado sobre a janela
         let is_hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if is_hovering && self.cmd_tx.is_some() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new("Solte para enviar ao PC remoto")
-                        .size(18.0)
-                        .color(egui::Color32::from_rgb(0, 212, 255)));
+                        .size(18.0).color(egui::Color32::from_rgb(0, 212, 255)));
                 });
             });
             return;
@@ -350,8 +378,6 @@ impl App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
-
-            // Status servidor + ID desta máquina
             egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(Color32::from_rgb(34,197,94)).size(13.0));
@@ -368,7 +394,6 @@ impl App {
                         ctx.output_mut(|o| o.copied_text = self.config.machine_id.clone());
                     }
                 });
-                // Status relay
                 if self.config.use_relay {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
@@ -381,7 +406,6 @@ impl App {
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(10.0);
-
             ui.label(RichText::new("Conectar em outro PC").size(13.0).strong());
             ui.add_space(8.0);
 
@@ -389,21 +413,15 @@ impl App {
                 egui::Grid::new("conn_grid").num_columns(2).spacing([8.0,8.0]).show(ui, |ui| {
                     ui.label(RichText::new("ID do host remoto").size(11.0).color(Color32::GRAY));
                     ui.add(egui::TextEdit::singleline(&mut self.config.remote_id)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("ex: A7X-92K"));
+                        .desired_width(f32::INFINITY).hint_text("ex: A7X-92K"));
                     ui.end_row();
                     ui.label(RichText::new("Senha").size(11.0).color(Color32::GRAY));
                     ui.add(egui::TextEdit::singleline(&mut self.pass_buf)
-                        .password(true)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("senha do peer remoto"));
+                        .password(true).desired_width(f32::INFINITY).hint_text("senha do peer remoto"));
                     ui.end_row();
                 });
-
                 ui.add_space(6.0);
-
                 if !self.drag_status.is_empty() {
-                    ui.add_space(4.0);
                     let color = if self.drag_status.starts_with("Enviando") {
                         egui::Color32::from_rgb(0,212,255)
                     } else {
@@ -412,14 +430,12 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.label(egui::RichText::new(&self.drag_status).size(11.0).color(color));
                     });
+                    ui.add_space(4.0);
                 }
-
                 if !self.conn_error.is_empty() {
                     ui.label(RichText::new(&self.conn_error).color(Color32::from_rgb(255,80,80)).size(11.0));
                     ui.add_space(4.0);
                 }
-
-                // Botão centralizado e menor
                 ui.vertical_centered(|ui| {
                     let label = if self.connecting { "Conectando..." } else { "Conectar" };
                     let btn = egui::Button::new(RichText::new(label).size(13.0))
@@ -432,6 +448,7 @@ impl App {
             });
         });
     }
+
     fn ui_remote(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("remote_bar")
             .frame(egui::Frame::none().fill(Color32::from_rgb(19,19,26)).inner_margin(egui::Margin::symmetric(8.0,6.0)))
@@ -453,14 +470,10 @@ impl App {
                     // Ícones de monitor
                     if self.monitors.len() > 1 {
                         ui.separator();
-                        for m in &self.monitors.clone() {
+                        for m in self.monitors.clone() {
                             let label = format!("🖥{}", m.index + 1);
                             let is_active = m.index == self.active_monitor;
-                            let color = if is_active {
-                                Color32::from_rgb(0, 212, 255)
-                            } else {
-                                Color32::GRAY
-                            };
+                            let color = if is_active { Color32::from_rgb(0,212,255) } else { Color32::GRAY };
                             if ui.add(egui::Button::new(RichText::new(&label).color(color).size(11.0))
                                 .frame(is_active)).clicked()
                             {
@@ -468,26 +481,15 @@ impl App {
                                 self.send_cmd(Cmd::SwitchMonitor { index: m.index });
                             }
                         }
-                        // Botão monitor+ — abre segunda janela
-                        if ui.small_button("🖥+").clicked() {
-                            // Abre nova janela egui com o próximo monitor
-                            let next = (self.active_monitor as usize + 1) % self.monitors.len();
-                            ctx.show_viewport_deferred(
-                                egui::ViewportId::from_hash_of("monitor2"),
-                                egui::ViewportBuilder::default()
-                                    .with_title(format!("RemoteLink — Monitor {}", next + 1))
-                                    .with_inner_size([900.0, 600.0]),
-                                move |ctx, _class| {
-                                    egui::CentralPanel::default().show(ctx, |ui| {
-                                        ui.centered_and_justified(|ui| {
-                                            ui.label(RichText::new(format!("Monitor {} — conecte novamente selecionando este monitor", next + 1))
-                                                .color(Color32::GRAY).size(13.0));
-                                        });
-                                    });
-                                },
-                            );
+                        // Botão monitor+ — toggle segunda janela
+                        let mon2_color = if self.show_monitor2 { Color32::from_rgb(0,212,255) } else { Color32::GRAY };
+                        if ui.add(egui::Button::new(RichText::new("🖥+").color(mon2_color).size(11.0))
+                            .frame(self.show_monitor2)).clicked()
+                        {
+                            self.show_monitor2 = !self.show_monitor2;
                         }
                     }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(RichText::new("Desconectar").color(Color32::from_rgb(255,80,80))).clicked() { self.disconnect(); }
                         ui.label(RichText::new(format!("FPS {:.0}", self.fps_display)).size(10.0).color(Color32::DARK_GRAY));
@@ -509,7 +511,6 @@ impl App {
                     let (x,y) = to_srv(pos);
                     self.send_cmd(Cmd::Input(InputEvent::MouseMove { x, y }));
                 }
-                // Click esquerdo
                 if resp.clicked() {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let (x,y) = to_srv(pos);
@@ -517,7 +518,6 @@ impl App {
                         self.send_cmd(Cmd::Input(InputEvent::MouseUp   { x, y, button: MouseBtn::Left }));
                     }
                 }
-                // Drag esquerdo — MouseDown ao começar, MouseUp ao soltar
                 if resp.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let (x,y) = to_srv(pos);
@@ -530,7 +530,6 @@ impl App {
                         self.send_cmd(Cmd::Input(InputEvent::MouseUp { x, y, button: MouseBtn::Left }));
                     }
                 }
-                // Click direito
                 if resp.secondary_clicked() {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let (x,y) = to_srv(pos);
@@ -634,8 +633,6 @@ impl App {
             });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(10.0);
-
-            // ID desta máquina
             egui::Frame::none().fill(Color32::from_rgb(19,19,26)).rounding(8.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Seu ID:").size(11.0).color(Color32::GRAY));
@@ -646,7 +643,6 @@ impl App {
                 });
                 ui.label(RichText::new("Compartilhe este ID com quem quiser te acessar.").size(10.0).color(Color32::DARK_GRAY));
             });
-
             ui.add_space(10.0);
             ui.label(RichText::new("Servidor (este PC)").size(11.0).color(Color32::GRAY));
             ui.add_space(6.0);
@@ -667,12 +663,9 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut self.cfg_folder).desired_width(260.0));
                 ui.end_row();
             });
-
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
-
-            // Toggle relay
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Relay (internet sem VPN)").size(11.0).color(Color32::GRAY));
                 let label = if self.config.use_relay {
@@ -684,7 +677,6 @@ impl App {
                     self.config.use_relay = !self.config.use_relay;
                 }
             });
-
             if self.config.use_relay {
                 ui.add_space(6.0);
                 egui::Grid::new("relay_cfg").num_columns(2).spacing([10.0,8.0]).show(ui, |ui| {
@@ -696,7 +688,6 @@ impl App {
                     ui.end_row();
                 });
             }
-
             ui.add_space(12.0);
             ui.vertical_centered(|ui| {
                 let btn = egui::Button::new(RichText::new("Salvar").size(13.0))
@@ -715,7 +706,9 @@ impl App {
             });
             if self.cfg_saved {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Salvo! Reinicie para aplicar mudanca de porta.").size(11.0).color(Color32::from_rgb(34,211,165)));
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Salvo! Reinicie para aplicar mudanca de porta.").size(11.0).color(Color32::from_rgb(34,211,165)));
+                });
             }
             ui.add_space(8.0);
             ui.separator();
@@ -768,8 +761,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RemoteLink")
-            .with_inner_size([460.0, 540.0])
-            .with_min_inner_size([380.0, 400.0])
+            .with_inner_size([420.0, 310.0])
+            .with_min_inner_size([380.0, 280.0])
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
