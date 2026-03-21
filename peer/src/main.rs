@@ -599,8 +599,10 @@ impl App {
             if let Some(tex) = &self.frame_tex {
                 let resp = ui.add(egui::Image::new(tex).fit_to_exact_size(available).sense(egui::Sense::click_and_drag()));
                 let rect = resp.rect;
-                let sx = self.server_w as f32 / rect.width();
-                let sy = self.server_h as f32 / rect.height();
+                let sw = if self.canvas_w > 0 { self.canvas_w } else { self.server_w };
+                let sh = if self.canvas_h > 0 { self.canvas_h } else { self.server_h };
+                let sx = sw as f32 / rect.width();
+                let sy = sh as f32 / rect.height();
                 let to_srv = |p: egui::Pos2| -> (i32,i32) {
                     (((p.x - rect.left()) * sx) as i32, ((p.y - rect.top()) * sy) as i32)
                 };
