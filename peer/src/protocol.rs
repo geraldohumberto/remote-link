@@ -32,7 +32,7 @@ pub enum Message {
     AuthFail    { reason: String },
     FrameInfo   { width: u32, height: u32, size: u32 },
     // Delta: envia só os blocos que mudaram
-    FrameDelta  { screen_w: u32, screen_h: u32, blocks: Vec<BlockInfo> },
+    FrameDelta  { screen_w: u32, screen_h: u32, monitor_id: u8, blocks: Vec<BlockInfo> },
     // Monitores
     MonitorList    { monitors: Vec<MonitorInfo> },
     SwitchMonitor  { index: u8 },

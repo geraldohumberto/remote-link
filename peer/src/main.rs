@@ -45,6 +45,11 @@ struct App {
     canvas:        Option<Vec<u8>>,
     canvas_w:      u32,
     canvas_h:      u32,
+    // canvas do monitor extra (monitor_id != 0)
+    canvas2:       Option<Vec<u8>>,
+    canvas2_w:     u32,
+    canvas2_h:     u32,
+    canvas2_mon:   u8,   // qual monitor_id está no canvas2
     fps_count:     u32,
     fps_last:      std::time::Instant,
     fps_display:   f32,
@@ -103,7 +108,8 @@ impl App {
             conn_error: String::new(), connecting: false,
             cmd_tx: None, evt_rx: None,
             server_w: 1920, server_h: 1080, peer_platform: String::new(),
-            frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0, fps_count: 0,
+            frame_tex: None, canvas: None, canvas_w: 0, canvas_h: 0,
+            canvas2: None, canvas2_w: 0, canvas2_h: 0, canvas2_mon: 1,
             fps_last: std::time::Instant::now(), fps_display: 0.0,
             file_items: Vec::new(), file_folder: String::new(),
             file_selected: None, file_status: String::new(),
@@ -151,32 +157,53 @@ impl App {
                     }
                     ctx.request_repaint();
                 }
-                Evt::FrameDelta { screen_w, screen_h, blocks } => {
-                    if self.canvas.is_none() || self.canvas_w != screen_w || self.canvas_h != screen_h {
-                        self.canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
-                        self.canvas_w = screen_w; self.canvas_h = screen_h;
-                    }
-                    let canvas = self.canvas.as_mut().unwrap();
-                    for (block, jpeg) in &blocks {
-                        if let Ok(img) = image::load_from_memory(jpeg) {
-                            let rgba = img.to_rgba8();
-                            for y in 0..block.h {
-                                for x in 0..block.w {
+                Evt::FrameDelta { monitor_id, screen_w, screen_h, blocks } => {
+                    // Escolhe qual canvas atualizar
+                    let is_main = monitor_id == self.active_monitor;
+                    if is_main {
+                        // Canvas principal
+                        if self.canvas.is_none() || self.canvas_w != screen_w || self.canvas_h != screen_h {
+                            self.canvas = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
+                            self.canvas_w = screen_w; self.canvas_h = screen_h;
+                        }
+                        let canvas = self.canvas.as_mut().unwrap();
+                        for (block, jpeg) in &blocks {
+                            if let Ok(img) = image::load_from_memory(jpeg) {
+                                let rgba = img.to_rgba8();
+                                for y in 0..block.h { for x in 0..block.w {
                                     let px = rgba.get_pixel(x, y);
                                     let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
                                     if idx + 3 < canvas.len() {
-                                        canvas[idx]   = px[0];
-                                        canvas[idx+1] = px[1];
-                                        canvas[idx+2] = px[2];
-                                        canvas[idx+3] = px[3];
+                                        canvas[idx] = px[0]; canvas[idx+1] = px[1];
+                                        canvas[idx+2] = px[2]; canvas[idx+3] = px[3];
                                     }
-                                }
+                                }}
+                            }
+                        }
+                        let ci = egui::ColorImage::from_rgba_unmultiplied([screen_w as usize, screen_h as usize], canvas);
+                        self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
+                    } else if self.show_monitor2 {
+                        // Canvas da segunda janela
+                        self.canvas2_mon = monitor_id;
+                        if self.canvas2.is_none() || self.canvas2_w != screen_w || self.canvas2_h != screen_h {
+                            self.canvas2 = Some(vec![0u8; (screen_w * screen_h * 4) as usize]);
+                            self.canvas2_w = screen_w; self.canvas2_h = screen_h;
+                        }
+                        let canvas = self.canvas2.as_mut().unwrap();
+                        for (block, jpeg) in &blocks {
+                            if let Ok(img) = image::load_from_memory(jpeg) {
+                                let rgba = img.to_rgba8();
+                                for y in 0..block.h { for x in 0..block.w {
+                                    let px = rgba.get_pixel(x, y);
+                                    let idx = (((block.y + y) * screen_w + (block.x + x)) * 4) as usize;
+                                    if idx + 3 < canvas.len() {
+                                        canvas[idx] = px[0]; canvas[idx+1] = px[1];
+                                        canvas[idx+2] = px[2]; canvas[idx+3] = px[3];
+                                    }
+                                }}
                             }
                         }
                     }
-                    let ci = egui::ColorImage::from_rgba_unmultiplied(
-                        [screen_w as usize, screen_h as usize], canvas);
-                    self.frame_tex = Some(ctx.load_texture("frame", ci, egui::TextureOptions::LINEAR));
                     self.fps_count += 1;
                     let elapsed = self.fps_last.elapsed().as_secs_f32();
                     if elapsed >= 1.0 {
@@ -204,6 +231,7 @@ impl App {
                     self.evt_rx = None; self.frame_tex = None;
                     self.monitors = Vec::new(); self.active_monitor = 0;
                     self.show_monitor2 = false;
+                    self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
                 }
             }
         }
@@ -258,25 +286,40 @@ impl eframe::App for App {
 
         // Segunda janela de monitor — mantida viva todo frame enquanto show_monitor2 = true
         if self.show_monitor2 {
-            let next_idx = (self.active_monitor as usize + 1) % self.monitors.len().max(1);
+            let next_idx = if self.monitors.len() > 1 {
+                // Pega o próximo monitor que não é o ativo
+                self.monitors.iter()
+                    .find(|m| m.index != self.active_monitor)
+                    .map(|m| m.index)
+                    .unwrap_or(1)
+            } else { 1 };
             let title = format!("RemoteLink — Monitor {}", next_idx + 1);
+            // Clona canvas2 para passar para o closure
+            let canvas2_data = self.canvas2.clone();
+            let w2 = self.canvas2_w;
+            let h2 = self.canvas2_h;
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("monitor2"),
                 egui::ViewportBuilder::default()
                     .with_title(&title)
                     .with_inner_size([900.0, 600.0]),
                 move |ctx, _class| {
-                    // Fecha a janela se o X for clicado
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        // será tratado no próximo frame via show_monitor2 = false
-                    }
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.centered_and_justified(|ui| {
-                            ui.label(RichText::new(format!(
-                                "Monitor {} — clique em 🖥{} na barra principal para trocar",
-                                next_idx + 1, next_idx + 1))
-                                .color(Color32::GRAY).size(13.0));
-                        });
+                    egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::BLACK)).show(ctx, |ui| {
+                        if let Some(ref data) = canvas2_data {
+                            if w2 > 0 && h2 > 0 {
+                                let ci = egui::ColorImage::from_rgba_unmultiplied([w2 as usize, h2 as usize], data);
+                                let tex = ctx.load_texture("frame2", ci, egui::TextureOptions::LINEAR);
+                                ui.add(egui::Image::new(&tex).fit_to_exact_size(ui.available_size()));
+                            } else {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(RichText::new("Aguardando frames do monitor...").color(Color32::GRAY).size(13.0));
+                                });
+                            }
+                        } else {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(RichText::new(format!("Monitor {} — aguardando...", next_idx + 1)).color(Color32::GRAY).size(13.0));
+                            });
+                        }
                     });
                 },
             );
