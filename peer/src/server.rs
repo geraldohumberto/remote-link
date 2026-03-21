@@ -14,8 +14,13 @@ use crate::protocol::*;
 
 pub async fn run(config: Arc<Config>) {
     if let Some((relay_host, relay_port)) = config.relay() {
-        let cfg = config.clone();
-        tokio::spawn(relay_register_loop(relay_host, relay_port, cfg));
+        let monitors = crate::capture::Capturer::list_monitors();
+        for mon in monitors {
+            let cfg = config.clone();
+            let rh = relay_host.clone();
+            let idx = if mon.index == 0 { None } else { Some(mon.index) };
+            tokio::spawn(relay_register_loop(rh, relay_port, cfg, idx));
+        }
     }
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -28,7 +33,7 @@ pub async fn run(config: Arc<Config>) {
             Ok((stream, peer)) => {
                 info!("Conexao direta de {}", peer);
                 let cfg = config.clone();
-                tokio::spawn(handle(stream, cfg));
+                tokio::spawn(handle(stream, cfg, None));
             }
             Err(e) => {
                 warn!("Erro accept: {}", e);
@@ -38,11 +43,14 @@ pub async fn run(config: Arc<Config>) {
     }
 }
 
-async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Config>) {
-    let my_id = config.machine_id.clone();
+async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Config>, monitor_index: Option<u8>) {
+    let my_id = match monitor_index {
+        None    => config.machine_id.clone(),
+        Some(i) => format!("{}-{}", config.machine_id, i),
+    };
     info!("Relay register loop — ID: {}", my_id);
     loop {
-        match relay_register_once(&relay_host, relay_port, &my_id, config.clone()).await {
+        match relay_register_once(&relay_host, relay_port, &my_id, config.clone(), monitor_index).await {
             Ok(()) => {
                 info!("Sessao relay encerrada, re-registrando em 3s...");
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -56,7 +64,7 @@ async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Co
 }
 
 async fn relay_register_once(
-    relay_host: &str, relay_port: u16, my_id: &str, config: Arc<Config>,
+    relay_host: &str, relay_port: u16, my_id: &str, config: Arc<Config>, monitor_index: Option<u8>,
 ) -> anyhow::Result<()> {
     let relay_addr = format!("{}:{}", relay_host, relay_port);
     let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&relay_addr)).await
@@ -80,22 +88,23 @@ async fn relay_register_once(
     if notif["id"].as_str() == Some("peer_connected") {
         info!("Peer conectou via relay — iniciando sessao");
         let stream = buf.into_inner().reunite(writer)?;
-        handle(stream, config).await?;
+        handle(stream, config, monitor_index).await?;
     } else {
         warn!("Notificacao inesperada do relay: {}", line.trim());
     }
     Ok(())
 }
 
-async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
+async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u8>) -> anyhow::Result<()> {
     stream.set_nodelay(true)?;
     let (mut reader, writer_raw) = stream.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer_raw));
 
-    // Auth — cliente pode pedir um monitor específico via monitor_index
+    // Auth — monitor_index pode vir do cliente ou ser forçado pelo relay
     let monitor_idx = match recv_msg(&mut reader).await? {
         Message::Auth { password, monitor_index } if password == config.password => {
-            let idx = monitor_index.unwrap_or(0) as usize;
+            // forced_monitor tem prioridade sobre o que o cliente pediu
+            let idx = forced_monitor.or(monitor_index).unwrap_or(0) as usize;
             let (sw, sh) = tokio::task::spawn_blocking(move || {
                 Capturer::new_with_index(idx).map(|c| c.size()).unwrap_or((1920, 1080))
             }).await?;

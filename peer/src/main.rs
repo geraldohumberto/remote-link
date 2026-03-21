@@ -277,7 +277,10 @@ impl App {
     }
 
     fn do_connect_monitor(&mut self, monitor_index: Option<u8>) {
-        let remote_id = self.config.remote_id.trim().to_string();
+        let remote_id = match monitor_index {
+            None    => self.config.remote_id.trim().to_string(),
+            Some(i) => format!("{}-{}", self.config.remote_id.trim(), i),
+        };
         let pass = if self.pass_buf.is_empty() { self.config.password.clone() } else { self.pass_buf.clone() };
         let relay = if self.config.use_relay && !self.config.relay_host.trim().is_empty() {
             Some((self.config.relay_host.trim().to_string(), self.config.relay_port))
@@ -564,6 +567,9 @@ impl App {
                             {
                                 self.active_monitor = m.index;
                                 self.send_cmd(Cmd::SwitchMonitor { index: m.index });
+                                // Reseta canvas para evitar mouse desalinhado
+                                self.canvas = None; self.canvas_w = 0; self.canvas_h = 0;
+                                self.frame_tex = None;
                             }
                         }
                         // Botão monitor+ — abre segunda conexão independente
