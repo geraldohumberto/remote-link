@@ -865,7 +865,7 @@ fn main() -> eframe::Result<()> {
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
-    eframe::run_native("RemoteLink", options, Box::new(|cc| {
+    eframe::run_native("RemoteLink", options, Box::new(move |cc| {
         let mut app = App::new(cc);
         // Se recebeu --connect, conecta automaticamente ao monitor especificado
         if let Some(id) = auto_connect_id {
