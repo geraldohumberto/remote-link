@@ -61,8 +61,9 @@ struct App {
     cfg_relay_host: String,
     cfg_relay_port: String,
     cfg_saved:     bool,
-    // info
-    local_ip:      String,
+    // monitores remotos
+    monitors:      Vec<protocol::MonitorInfo>,
+    active_monitor: u8,
     drag_status:   String,
 }
 
@@ -106,6 +107,7 @@ impl App {
             cfg_relay_host, cfg_relay_port, cfg_saved: false,
             local_ip,
             drag_status: String::new(),
+            monitors: Vec::new(), active_monitor: 0,
         }
     }
 
@@ -118,6 +120,9 @@ impl App {
         };
         for evt in events {
             match evt {
+                Evt::MonitorList { monitors } => {
+                    self.monitors = monitors;
+                }
                 Evt::Connected { screen_w, screen_h, platform } => {
                     self.server_w = screen_w; self.server_h = screen_h;
                     self.peer_platform = platform;
@@ -195,6 +200,7 @@ impl App {
                 Evt::Disconnected => {
                     self.screen = Screen::Main; self.cmd_tx = None;
                     self.evt_rx = None; self.frame_tex = None;
+                    self.monitors = Vec::new(); self.active_monitor = 0;
                 }
             }
         }
@@ -440,6 +446,45 @@ impl App {
                     if ui.small_button("CAD").clicked() {
                         for k in &["ctrl","alt","delete"] { self.send_cmd(Cmd::Input(InputEvent::KeyDown { key: k.to_string() })); }
                         for k in &["delete","alt","ctrl"] { self.send_cmd(Cmd::Input(InputEvent::KeyUp   { key: k.to_string() })); }
+                    }
+
+                    // Ícones de monitor
+                    if self.monitors.len() > 1 {
+                        ui.separator();
+                        for m in &self.monitors.clone() {
+                            let label = format!("🖥{}", m.index + 1);
+                            let is_active = m.index == self.active_monitor;
+                            let color = if is_active {
+                                Color32::from_rgb(0, 212, 255)
+                            } else {
+                                Color32::GRAY
+                            };
+                            if ui.add(egui::Button::new(RichText::new(&label).color(color).size(11.0))
+                                .frame(is_active)).clicked()
+                            {
+                                self.active_monitor = m.index;
+                                self.send_cmd(Cmd::SwitchMonitor { index: m.index });
+                            }
+                        }
+                        // Botão monitor+ — abre segunda janela
+                        if ui.small_button("🖥+").clicked() {
+                            // Abre nova janela egui com o próximo monitor
+                            let next = (self.active_monitor as usize + 1) % self.monitors.len();
+                            ctx.show_viewport_deferred(
+                                egui::ViewportId::from_hash_of("monitor2"),
+                                egui::ViewportBuilder::default()
+                                    .with_title(format!("RemoteLink — Monitor {}", next + 1))
+                                    .with_inner_size([900.0, 600.0]),
+                                move |ctx, _class| {
+                                    egui::CentralPanel::default().show(ctx, |ui| {
+                                        ui.centered_and_justified(|ui| {
+                                            ui.label(RichText::new(format!("Monitor {} — conecte novamente selecionando este monitor", next + 1))
+                                                .color(Color32::GRAY).size(13.0));
+                                        });
+                                    });
+                                },
+                            );
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(RichText::new("Desconectar").color(Color32::from_rgb(255,80,80))).clicked() { self.disconnect(); }

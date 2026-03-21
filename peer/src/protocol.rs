@@ -16,6 +16,15 @@ pub type Writer = Arc<Mutex<OwnedWriteHalf>>;
 pub type Reader = OwnedReadHalf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    pub index:   u8,
+    pub width:   u32,
+    pub height:  u32,
+    pub primary: bool,
+    pub name:    String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum Message {
     Auth        { password: String },
@@ -24,6 +33,9 @@ pub enum Message {
     FrameInfo   { width: u32, height: u32, size: u32 },
     // Delta: envia só os blocos que mudaram
     FrameDelta  { screen_w: u32, screen_h: u32, blocks: Vec<BlockInfo> },
+    // Monitores
+    MonitorList    { monitors: Vec<MonitorInfo> },
+    SwitchMonitor  { index: u8 },
     Input(InputEvent),
     Clipboard   { text: String },
     FileListReq { folder: Option<String> },

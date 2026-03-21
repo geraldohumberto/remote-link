@@ -1,7 +1,7 @@
 use anyhow::Result;
 use image::{ImageBuffer, Rgba, RgbImage};
 use xcap::Monitor;
-use crate::protocol::{BlockInfo, BLOCK_SIZE};
+use crate::protocol::{BlockInfo, BLOCK_SIZE, MonitorInfo};
 
 pub struct Capturer {
     monitor:    Monitor,
@@ -12,15 +12,46 @@ pub struct Capturer {
 
 impl Capturer {
     pub fn new() -> Result<Self> {
+        Self::new_with_index(0)
+    }
+
+    pub fn new_with_index(index: usize) -> Result<Self> {
         let monitors = Monitor::all()?;
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.is_primary())
+        // Tenta pegar pelo índice, senão pega o primário
+        let monitor = monitors.into_iter().nth(index)
+            .or_else(|| Monitor::all().ok()?.into_iter().find(|m| m.is_primary()))
             .or_else(|| Monitor::all().ok()?.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("Nenhum monitor encontrado"))?;
+            .ok_or_else(|| anyhow::anyhow!("Monitor {} nao encontrado", index))?;
         let width  = monitor.width();
         let height = monitor.height();
         Ok(Self { monitor, width, height, prev_frame: None })
+    }
+
+    /// Lista todos os monitores disponíveis
+    pub fn list_monitors() -> Vec<MonitorInfo> {
+        Monitor::all().unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, m)| MonitorInfo {
+                index:   i as u8,
+                width:   m.width(),
+                height:  m.height(),
+                primary: m.is_primary(),
+                name:    m.name().to_string(),
+            })
+            .collect()
+    }
+
+    /// Troca para outro monitor, resetando o diff
+    pub fn switch_monitor(&mut self, index: usize) -> Result<()> {
+        let monitors = Monitor::all()?;
+        if let Some(m) = monitors.into_iter().nth(index) {
+            self.width  = m.width();
+            self.height = m.height();
+            self.monitor = m;
+            self.prev_frame = None; // força frame completo no próximo tick
+        }
+        Ok(())
     }
 
     /// Captura só os blocos que mudaram em relação ao frame anterior.

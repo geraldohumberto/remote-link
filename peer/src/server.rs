@@ -130,6 +130,10 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
                 platform: std::env::consts::OS.to_string(),
                 peer_id:  Uuid::new_v4().to_string(),
             }).await?;
+
+            // Envia lista de monitores logo após AuthOk
+            let monitors = Capturer::list_monitors();
+            send_msg(&writer, &Message::MonitorList { monitors }).await?;
         }
         Message::Auth { .. } => {
             send_msg(&writer, &Message::AuthFail { reason: "Senha incorreta".into() }).await?;
@@ -141,6 +145,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     // Canal: (screen_w, screen_h, blocos_delta)
     type DeltaMsg = (u32, u32, Vec<(crate::protocol::BlockInfo, Vec<u8>)>);
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<DeltaMsg>(2);
+    let (switch_tx, switch_rx)   = std::sync::mpsc::channel::<usize>();
     let quality = config.jpeg_quality;
     let fps     = config.fps;
 
@@ -151,6 +156,9 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
         };
         let interval_ms = std::time::Duration::from_millis(1000 / fps);
         loop {
+            if let Ok(idx) = switch_rx.try_recv() {
+                let _ = cap.switch_monitor(idx);
+            }
             let t0 = std::time::Instant::now();
             match cap.capture_delta(quality) {
                 Ok(Some(delta)) => {
@@ -188,6 +196,9 @@ async fn handle(stream: TcpStream, config: Arc<Config>) -> anyhow::Result<()> {
     loop {
         match recv_msg(&mut reader).await? {
             Message::Input(ev) => { let _ = inj.inject(&ev); }
+            Message::SwitchMonitor { index } => {
+                let _ = switch_tx.send(index as usize);
+            }
             Message::Clipboard { text } => {
                 if let Ok(mut c) = arboard::Clipboard::new() { let _ = c.set_text(text); }
             }
