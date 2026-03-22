@@ -550,30 +550,18 @@ impl App {
                                 self.server_h = m.height;
                             }
                         }
-                        // Botão monitor+ — abre segunda conexão independente
-                        let mon2_color = if self.show_monitor2 { Color32::from_rgb(0,212,255) } else { Color32::GRAY };
-                        if ui.add(egui::Button::new(RichText::new("🖥+").color(mon2_color).size(11.0))
-                            .frame(self.show_monitor2)).clicked()
+                        // Botão monitor+ — sempre spawna novo processo independente
+                        if ui.add(egui::Button::new(RichText::new("🖥+").color(Color32::GRAY).size(11.0))).clicked()
                         {
-                            if self.show_monitor2 {
-                                self.show_monitor2 = false;
-                                self.send_cmd2(Cmd::Disconnect);
-                                self.cmd_tx2 = None; self.evt_rx2 = None;
-                                self.frame_tex2 = None;
-                                self.canvas2 = None; self.canvas2_w = 0; self.canvas2_h = 0;
-                            } else {
-                                let next_mon = self.next_monitor_for_secondary();
-                                // Spawna novo processo independente
-                                let exe = std::env::current_exe().unwrap_or_default();
-                                let remote_id = self.config.remote_id.trim().to_string();
-                                let _ = std::process::Command::new(&exe)
-                                    .arg("--connect")
-                                    .arg(&remote_id)
-                                    .arg("--monitor")
-                                    .arg(next_mon.to_string())
-                                    .spawn();
-                                self.show_monitor2 = true;
-                            }
+                            let next_mon = self.next_monitor_for_secondary();
+                            let exe = std::env::current_exe().unwrap_or_default();
+                            let remote_id = self.config.remote_id.trim().to_string();
+                            let _ = std::process::Command::new(&exe)
+                                .arg("--connect")
+                                .arg(&remote_id)
+                                .arg("--monitor")
+                                .arg(next_mon.to_string())
+                                .spawn();
                         }
                     }
 

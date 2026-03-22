@@ -17,7 +17,8 @@ impl Capturer {
 
     pub fn new_with_index(index: usize) -> Result<Self> {
         let mut monitors = Monitor::all()?;
-        monitors.sort_by_key(|m| m.x());
+        // Primário primeiro, depois os demais por posição X
+        monitors.sort_by_key(|m| (!m.is_primary(), m.x()));
         let monitor = monitors.into_iter().nth(index)
             .or_else(|| Monitor::all().ok()?.into_iter().find(|m| m.is_primary()))
             .or_else(|| Monitor::all().ok()?.into_iter().next())
@@ -29,7 +30,8 @@ impl Capturer {
 
     pub fn list_monitors() -> Vec<MonitorInfo> {
         let mut monitors = Monitor::all().unwrap_or_default();
-        monitors.sort_by_key(|m| m.x());
+        // Primário primeiro, depois os demais por posição X
+        monitors.sort_by_key(|m| (!m.is_primary(), m.x()));
         monitors
             .into_iter()
             .enumerate()
@@ -45,7 +47,7 @@ impl Capturer {
 
     pub fn switch_monitor(&mut self, index: usize) -> Result<()> {
         let mut monitors = Monitor::all()?;
-        monitors.sort_by_key(|m| m.x());
+        monitors.sort_by_key(|m| (!m.is_primary(), m.x()));
         if let Some(m) = monitors.into_iter().nth(index) {
             self.width  = m.width();
             self.height = m.height();
