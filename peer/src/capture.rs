@@ -1,7 +1,7 @@
 use anyhow::Result;
 use image::{ImageBuffer, Rgba, RgbImage};
 use xcap::Monitor;
-use crate::protocol::{BlockInfo, BLOCK_SIZE};
+use crate::protocol::{BlockInfo, BLOCK_SIZE, MonitorInfo};
 
 pub struct Capturer {
     monitor:    Monitor,
@@ -12,19 +12,49 @@ pub struct Capturer {
 
 impl Capturer {
     pub fn new() -> Result<Self> {
-        let monitors = Monitor::all()?;
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.is_primary())
+        Self::new_with_index(0)
+    }
+
+    pub fn new_with_index(index: usize) -> Result<Self> {
+        let mut monitors = Monitor::all()?;
+        monitors.sort_by_key(|m| m.x());
+        let monitor = monitors.into_iter().nth(index)
+            .or_else(|| Monitor::all().ok()?.into_iter().find(|m| m.is_primary()))
             .or_else(|| Monitor::all().ok()?.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("Nenhum monitor encontrado"))?;
+            .ok_or_else(|| anyhow::anyhow!("Monitor {} nao encontrado", index))?;
         let width  = monitor.width();
         let height = monitor.height();
         Ok(Self { monitor, width, height, prev_frame: None })
     }
 
-    /// Captura só os blocos que mudaram em relação ao frame anterior.
-    /// Retorna (screen_w, screen_h, blocos) ou None se nada mudou.
+    pub fn list_monitors() -> Vec<MonitorInfo> {
+        let mut monitors = Monitor::all().unwrap_or_default();
+        monitors.sort_by_key(|m| m.x());
+        monitors
+            .into_iter()
+            .enumerate()
+            .map(|(i, m)| MonitorInfo {
+                index:   i as u8,
+                width:   m.width(),
+                height:  m.height(),
+                primary: m.is_primary(),
+                name:    m.name().to_string(),
+            })
+            .collect()
+    }
+
+    pub fn switch_monitor(&mut self, index: usize) -> Result<()> {
+        let mut monitors = Monitor::all()?;
+        monitors.sort_by_key(|m| m.x());
+        if let Some(m) = monitors.into_iter().nth(index) {
+            self.width  = m.width();
+            self.height = m.height();
+            self.monitor = m;
+            self.prev_frame = None;
+        }
+        Ok(())
+    }
+
     pub fn capture_delta(&mut self, quality: u8) -> Result<Option<(u32, u32, Vec<(BlockInfo, Vec<u8>)>)>> {
         let frame = self.monitor.capture_image()?;
         let (w, h) = (frame.width(), frame.height());
@@ -35,20 +65,16 @@ impl Capturer {
             (w, h)
         };
         let current = to_rgb(&frame, tw, th);
-
         let mut changed_blocks: Vec<(BlockInfo, Vec<u8>)> = Vec::new();
-
         if let Some(prev) = &self.prev_frame {
             let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
             for row in 0..rows {
                 for col in 0..cols {
                     let bx = col * BLOCK_SIZE;
                     let by = row * BLOCK_SIZE;
                     let bw = BLOCK_SIZE.min(tw - bx);
                     let bh = BLOCK_SIZE.min(th - by);
-
                     if block_changed(prev, &current, bx, by, bw, bh) {
                         let block_img = crop_block(&current, bx, by, bw, bh);
                         let jpeg = jpeg_encode(&block_img, quality)?;
@@ -58,22 +84,14 @@ impl Capturer {
                 }
             }
         } else {
-            // Primeiro frame — manda tela inteira como um bloco só
             let jpeg = jpeg_encode(&current, quality)?;
             let size = jpeg.len() as u32;
             changed_blocks.push((BlockInfo { x: 0, y: 0, w: tw, h: th, size }, jpeg));
         }
-
         self.prev_frame = Some(current);
-
-        if changed_blocks.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some((tw, th, changed_blocks)))
-        }
+        if changed_blocks.is_empty() { Ok(None) } else { Ok(Some((tw, th, changed_blocks))) }
     }
 
-    /// Mantido para compatibilidade com AuthOk (só pega tamanho)
     pub fn capture_jpeg(&mut self, quality: u8) -> Result<Vec<u8>> {
         let frame = self.monitor.capture_image()?;
         let (w, h) = (frame.width(), frame.height());
@@ -82,6 +100,7 @@ impl Capturer {
         self.prev_frame = Some(rgb.clone());
         jpeg_encode(&rgb, quality)
     }
+
     pub fn size(&self) -> (u32, u32) { (self.width, self.height) }
 }
 
@@ -102,9 +121,7 @@ fn block_changed(prev: &RgbImage, curr: &RgbImage, bx: u32, by: u32, bw: u32, bh
         for x in bx..bx+bw {
             let p = prev.get_pixel(x, y);
             let c = curr.get_pixel(x, y);
-            if p[0].abs_diff(c[0]) > 8
-            || p[1].abs_diff(c[1]) > 8
-            || p[2].abs_diff(c[2]) > 8 {
+            if p[0].abs_diff(c[0]) > 8 || p[1].abs_diff(c[1]) > 8 || p[2].abs_diff(c[2]) > 8 {
                 return true;
             }
         }
