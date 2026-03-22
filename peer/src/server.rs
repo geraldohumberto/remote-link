@@ -115,7 +115,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
             }).await?;
             let monitors = Capturer::list_monitors();
             send_msg(&writer, &Message::MonitorList { monitors }).await?;
-            monitor_index.unwrap_or(0) as usize
+            forced_monitor.or(monitor_index).unwrap_or(0) as usize
         }
         Message::Auth { .. } => {
             send_msg(&writer, &Message::AuthFail { reason: "Senha incorreta".into() }).await?;

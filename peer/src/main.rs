@@ -542,9 +542,12 @@ impl App {
                             {
                                 self.active_monitor = m.index;
                                 self.send_cmd(Cmd::SwitchMonitor { index: m.index });
-                                // Reseta canvas para evitar mouse desalinhado
+                                // Reseta canvas e atualiza dimensões do novo monitor
                                 self.canvas = None; self.canvas_w = 0; self.canvas_h = 0;
                                 self.frame_tex = None;
+                                // Atualiza server_w/h com as dimensões reais do monitor selecionado
+                                self.server_w = m.width;
+                                self.server_h = m.height;
                             }
                         }
                         // Botão monitor+ — abre segunda conexão independente
