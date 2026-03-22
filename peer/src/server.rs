@@ -167,6 +167,15 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
         }
     });
 
+    // Pega offset do monitor ativo para injetar coordenadas absolutas corretas
+    let monitor_offset = Arc::new(std::sync::Mutex::new({
+        let monitors = Capturer::list_monitors();
+        monitors.iter()
+            .find(|m| m.index == forced_monitor.unwrap_or(monitor_idx as u8))
+            .map(|m| (m.offset_x, m.offset_y))
+            .unwrap_or((0, 0))
+    }));
+
     let mut inj = match Injector::new() {
         Ok(i)  => i,
         Err(e) => { warn!("Injector falhou: {}", e); anyhow::bail!("Injector: {}", e); }
@@ -174,8 +183,19 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
 
     loop {
         match recv_msg(&mut reader).await? {
-            Message::Input(ev) => { let _ = inj.inject(&ev); }
-            Message::SwitchMonitor { index } => { let _ = switch_tx.send(index as usize); }
+            Message::Input(ev) => {
+                let offset = *monitor_offset.lock().unwrap();
+                let ev_with_offset = apply_offset(ev, offset);
+                let _ = inj.inject(&ev_with_offset);
+            }
+            Message::SwitchMonitor { index } => {
+                let _ = switch_tx.send(index as usize);
+                // Atualiza offset do monitor
+                let monitors = Capturer::list_monitors();
+                if let Some(m) = monitors.iter().find(|m| m.index == index) {
+                    *monitor_offset.lock().unwrap() = (m.offset_x, m.offset_y);
+                }
+            }
             Message::Clipboard { text } => {
                 if let Ok(mut c) = arboard::Clipboard::new() { let _ = c.set_text(text); }
             }
@@ -221,6 +241,19 @@ fn file_list(folder: &PathBuf) -> Message {
     }
     items.sort_by(|a, b| a.name.cmp(&b.name));
     Message::FileListRes { folder: folder.to_string_lossy().to_string(), items }
+}
+
+fn apply_offset(ev: crate::protocol::InputEvent, offset: (i32, i32)) -> crate::protocol::InputEvent {
+    use crate::protocol::InputEvent::*;
+    let (ox, oy) = offset;
+    match ev {
+        MouseMove { x, y }           => MouseMove { x: x + ox, y: y + oy },
+        MouseDown { x, y, button }   => MouseDown { x: x + ox, y: y + oy, button },
+        MouseUp   { x, y, button }   => MouseUp   { x: x + ox, y: y + oy, button },
+        MouseDbl  { x, y }           => MouseDbl  { x: x + ox, y: y + oy },
+        Scroll    { x, y, dy }       => Scroll    { x: x + ox, y: y + oy, dy },
+        other => other,
+    }
 }
 
 async fn do_download(w: &Writer, path: &PathBuf, filename: &str) -> anyhow::Result<()> {

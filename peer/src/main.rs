@@ -551,16 +551,15 @@ impl App {
                             }
                         }
                         // Botão monitor+ — sempre spawna novo processo independente
-                        if ui.add(egui::Button::new(RichText::new("🖥+").color(Color32::GRAY).size(11.0))).clicked()
-                        {
+                        if ui.add(egui::Button::new(RichText::new("🖥+").color(Color32::GRAY).size(11.0))).clicked() {
                             let next_mon = self.next_monitor_for_secondary();
                             let exe = std::env::current_exe().unwrap_or_default();
                             let remote_id = self.config.remote_id.trim().to_string();
+                            let pass = self.pass_buf.clone();
                             let _ = std::process::Command::new(&exe)
-                                .arg("--connect")
-                                .arg(&remote_id)
-                                .arg("--monitor")
-                                .arg(next_mon.to_string())
+                                .arg("--connect").arg(&remote_id)
+                                .arg("--monitor").arg(next_mon.to_string())
+                                .arg("--password").arg(&pass)
                                 .spawn();
                         }
                     }
@@ -833,11 +832,13 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut auto_connect_id: Option<String> = None;
     let mut auto_monitor: Option<u8> = None;
+    let mut auto_password: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--connect" => { i += 1; if i < args.len() { auto_connect_id = Some(args[i].clone()); } }
-            "--monitor" => { i += 1; if i < args.len() { auto_monitor = args[i].parse().ok(); } }
+            "--connect"  => { i += 1; if i < args.len() { auto_connect_id = Some(args[i].clone()); } }
+            "--monitor"  => { i += 1; if i < args.len() { auto_monitor = args[i].parse().ok(); } }
+            "--password" => { i += 1; if i < args.len() { auto_password = Some(args[i].clone()); } }
             _ => {}
         }
         i += 1;
@@ -861,8 +862,10 @@ fn main() -> eframe::Result<()> {
         // Se recebeu --connect, conecta automaticamente ao monitor especificado
         if let Some(id) = auto_connect_id {
             app.config.remote_id = id.clone();
+            if let Some(pass) = auto_password {
+                app.pass_buf = pass;
+            }
             app.do_connect_monitor(auto_monitor);
-            // Marca que é uma janela secundária para não registrar relay duplo
             app.is_secondary = true;
         }
         Box::new(app)

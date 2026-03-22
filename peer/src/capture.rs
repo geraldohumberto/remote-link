@@ -36,11 +36,13 @@ impl Capturer {
             .into_iter()
             .enumerate()
             .map(|(i, m)| MonitorInfo {
-                index:   i as u8,
-                width:   m.width(),
-                height:  m.height(),
-                primary: m.is_primary(),
-                name:    m.name().to_string(),
+                index:    i as u8,
+                width:    m.width(),
+                height:   m.height(),
+                primary:  m.is_primary(),
+                name:     m.name().to_string(),
+                offset_x: m.x(),
+                offset_y: m.y(),
             })
             .collect()
     }

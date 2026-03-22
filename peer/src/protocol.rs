@@ -17,11 +17,13 @@ pub type Reader = OwnedReadHalf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
-    pub index:   u8,
-    pub width:   u32,
-    pub height:  u32,
-    pub primary: bool,
-    pub name:    String,
+    pub index:    u8,
+    pub width:    u32,
+    pub height:   u32,
+    pub primary:  bool,
+    pub name:     String,
+    pub offset_x: i32,
+    pub offset_y: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
