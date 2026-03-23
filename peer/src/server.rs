@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -11,6 +11,7 @@ use crate::capture::Capturer;
 use crate::config::Config;
 use crate::input::Injector;
 use crate::protocol::*;
+use crate::tls;
 
 pub async fn run(config: Arc<Config>) {
     if let Some((relay_host, relay_port)) = config.relay() {
@@ -23,12 +24,31 @@ pub async fn run(config: Arc<Config>) {
         Ok(l)  => { info!("Servidor escutando em {}", addr); l }
         Err(e) => { warn!("Nao foi possivel bindar {}: {}", addr, e); return; }
     };
+
+    let tls_acceptor = match tls::make_server_tls() {
+        Ok(a)  => { info!("TLS ativo"); Some(a) }
+        Err(e) => { warn!("TLS falhou: {} — rodando sem criptografia", e); None }
+    };
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                info!("Conexao direta de {}", peer);
+                info!("Conexao de {}", peer);
                 let cfg = config.clone();
-                tokio::spawn(handle(stream, cfg, None));
+                let acc = tls_acceptor.clone();
+                tokio::spawn(async move {
+                    if let Some(acceptor) = acc {
+                        match acceptor.accept(stream).await {
+                            Ok(s) => {
+                                let (r, w) = tokio::io::split(s);
+                                if let Err(e) = handle_rw(r, w, cfg, None).await { warn!("{}", e); }
+                            }
+                            Err(e) => warn!("TLS handshake falhou: {}", e),
+                        }
+                    } else {
+                        if let Err(e) = handle(stream, cfg, None).await { warn!("{}", e); }
+                    }
+                });
             }
             Err(e) => {
                 warn!("Erro accept: {}", e);
@@ -78,10 +98,10 @@ async fn relay_register_once(
     buf.read_line(&mut line).await?;
     let notif: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
     if notif["id"].as_str() == Some("peer_connected") {
-        info!("Peer conectou via relay — iniciando sessao");
+        info!("Peer conectou via relay — iniciando sessao TLS");
         let stream = buf.into_inner().reunite(writer)?;
-        
-        // Re-registra imediatamente em background para manter ID sempre disponível
+
+        // Re-registra em background imediatamente
         let rh2 = relay_host.to_string();
         let rp2 = relay_port;
         let id2 = my_id.to_string();
@@ -90,58 +110,86 @@ async fn relay_register_once(
         let rt = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             rt.block_on(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 loop {
                     match relay_register_once(&rh2, rp2, &id2, cfg2.clone(), mon2).await {
-                        Ok(()) => {
-                            info!("Sessao relay encerrada, re-registrando...");
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                        Err(e) => {
-                            warn!("Relay falhou: {} — tentando em 5s", e);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                        }
+                        Ok(()) => { tokio::time::sleep(Duration::from_millis(500)).await; }
+                        Err(e) => { warn!("Relay re-reg falhou: {}", e); tokio::time::sleep(Duration::from_secs(5)).await; }
                     }
                 }
             });
         });
-        
-        handle(stream, config, monitor_index).await?;
+
+        // Tenta TLS sobre a conexão relay
+        let tls_acceptor = tls::make_server_tls().ok();
+        if let Some(acceptor) = tls_acceptor {
+            match acceptor.accept(stream).await {
+                Ok(s) => {
+                    let (r, w) = tokio::io::split(s);
+                    handle_rw(r, w, config, monitor_index).await?;
+                }
+                Err(e) => {
+                    warn!("TLS relay falhou: {} — tentando sem TLS", e);
+                }
+            }
+        } else {
+            handle(stream, config, monitor_index).await?;
+        }
     } else {
         warn!("Notificacao inesperada do relay: {}", line.trim());
     }
     Ok(())
 }
 
+// Handle para conexão TCP direta (sem TLS)
 async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u8>) -> anyhow::Result<()> {
     stream.set_nodelay(true)?;
-    let (mut reader, writer_raw) = stream.into_split();
-    let writer: Writer = Arc::new(Mutex::new(writer_raw));
+    let (r, w) = stream.into_split();
+    handle_rw(r, w, config, forced_monitor).await
+}
 
-    // Auth — monitor_index pode vir do cliente ou ser forçado pelo relay
-    let monitor_idx = match recv_msg(&mut reader).await? {
+// Handle genérico para qualquer stream (TLS ou plain)
+async fn handle_rw<R, W>(
+    reader: R, writer_raw: W,
+    config: Arc<Config>, forced_monitor: Option<u8>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let writer: Arc<Mutex<W>> = Arc::new(Mutex::new(writer_raw));
+    let mut reader = reader;
+
+    let monitor_idx = match recv_msg_r(&mut reader).await? {
         Message::Auth { password, monitor_index } if password == config.password => {
-            // forced_monitor tem prioridade sobre o que o cliente pediu
             let idx = forced_monitor.or(monitor_index).unwrap_or(0) as usize;
             let (sw, sh) = tokio::task::spawn_blocking(move || {
-                Capturer::new_with_index(idx).map(|c| c.size()).unwrap_or((1920, 1080))
+                Capturer::new_with_index(idx).map(|c: Capturer| c.size()).unwrap_or((1920, 1080))
             }).await?;
-            send_msg(&writer, &Message::AuthOk {
+            send_msg_w(&writer, &Message::AuthOk {
                 screen_w: sw, screen_h: sh,
                 platform: std::env::consts::OS.to_string(),
                 peer_id:  Uuid::new_v4().to_string(),
                 monitor_index: forced_monitor.or(monitor_index).unwrap_or(0),
             }).await?;
             let monitors = Capturer::list_monitors();
-            send_msg(&writer, &Message::MonitorList { monitors }).await?;
+            send_msg_w(&writer, &Message::MonitorList { monitors }).await?;
             forced_monitor.or(monitor_index).unwrap_or(0) as usize
         }
         Message::Auth { .. } => {
-            send_msg(&writer, &Message::AuthFail { reason: "Senha incorreta".into() }).await?;
+            send_msg_w(&writer, &Message::AuthFail { reason: "Senha incorreta".into() }).await?;
             anyhow::bail!("Senha errada");
         }
         _ => anyhow::bail!("Protocolo inesperado na auth"),
     };
+
+    let monitor_offset = Arc::new(std::sync::Mutex::new({
+        let monitors = Capturer::list_monitors();
+        monitors.iter()
+            .find(|m| m.index == forced_monitor.unwrap_or(monitor_idx as u8))
+            .map(|m| (m.offset_x, m.offset_y))
+            .unwrap_or((0, 0))
+    }));
 
     type DeltaMsg = (u32, u32, Vec<(crate::protocol::BlockInfo, Vec<u8>)>);
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<DeltaMsg>(2);
@@ -156,14 +204,10 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
         };
         let interval_ms = std::time::Duration::from_millis(1000 / fps);
         loop {
-            if let Ok(idx) = switch_rx.try_recv() {
-                let _ = cap.switch_monitor(idx);
-            }
+            if let Ok(idx) = switch_rx.try_recv() { let _ = cap.switch_monitor(idx); }
             let t0 = std::time::Instant::now();
             match cap.capture_delta(quality) {
-                Ok(Some(delta)) => {
-                    if frame_tx.blocking_send(delta).is_err() { break; }
-                }
+                Ok(Some(delta)) => { if frame_tx.blocking_send(delta).is_err() { break; } }
                 Ok(None) => {}
                 Err(e) => { warn!("Captura falhou: {}", e); }
             }
@@ -176,7 +220,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
     let frame_task = tokio::spawn(async move {
         while let Some((sw, sh, blocks)) = frame_rx.recv().await {
             let block_infos: Vec<crate::protocol::BlockInfo> = blocks.iter().map(|(b,_)| b.clone()).collect();
-            if send_msg(&w2, &Message::FrameDelta {
+            if send_msg_w(&w2, &Message::FrameDelta {
                 monitor_id: 0, screen_w: sw, screen_h: sh, blocks: block_infos,
             }).await.is_err() { break; }
             for (_, jpeg) in &blocks {
@@ -186,30 +230,20 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
         }
     });
 
-    // Pega offset do monitor ativo para injetar coordenadas absolutas corretas
-    let monitor_offset = Arc::new(std::sync::Mutex::new({
-        let monitors = Capturer::list_monitors();
-        monitors.iter()
-            .find(|m| m.index == forced_monitor.unwrap_or(monitor_idx as u8))
-            .map(|m| (m.offset_x, m.offset_y))
-            .unwrap_or((0, 0))
-    }));
-
     let mut inj = match Injector::new() {
         Ok(i)  => i,
         Err(e) => { warn!("Injector falhou: {}", e); anyhow::bail!("Injector: {}", e); }
     };
 
     loop {
-        match recv_msg(&mut reader).await? {
+        match recv_msg_r(&mut reader).await? {
             Message::Input(ev) => {
                 let offset = *monitor_offset.lock().unwrap();
-                let ev_with_offset = apply_offset(ev, offset);
-                let _ = inj.inject(&ev_with_offset);
+                let ev_off = apply_offset(ev, offset);
+                let _ = inj.inject(&ev_off);
             }
             Message::SwitchMonitor { index } => {
                 let _ = switch_tx.send(index as usize);
-                // Atualiza offset do monitor
                 let monitors = Capturer::list_monitors();
                 if let Some(m) = monitors.iter().find(|m| m.index == index) {
                     *monitor_offset.lock().unwrap() = (m.offset_x, m.offset_y);
@@ -220,19 +254,19 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
             }
             Message::FileListReq { folder } => {
                 let base = folder.map(PathBuf::from).unwrap_or_else(|| config.shared_path());
-                send_msg(&writer, &file_list(&base)).await?;
+                send_msg_w(&writer, &file_list(&base)).await?;
             }
             Message::FileDownload { filename, .. } => {
                 let path = config.shared_path().join(&filename);
-                do_download(&writer, &path, &filename).await?;
+                do_download_w(&writer, &path, &filename).await?;
             }
             Message::FileUpload { filename, filesize } => {
                 let dest = config.shared_path().join(
                     PathBuf::from(&filename).file_name().unwrap_or_default()
                 );
-                do_upload(&writer, &mut reader, &dest, &filename, filesize).await?;
+                do_upload_rw(&writer, &mut reader, &dest, &filename, filesize).await?;
             }
-            Message::Ping => { send_msg(&writer, &Message::Pong).await?; }
+            Message::Ping => { send_msg_w(&writer, &Message::Pong).await?; }
             Message::Disconnect => break,
             _ => {}
         }
@@ -241,6 +275,78 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
     frame_task.abort();
     drop(capture_thread);
     Ok(())
+}
+
+// Wrappers para recv/send com reader/writer genéricos
+async fn recv_msg_r<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Message> {
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
+async fn send_msg_w<W: AsyncWrite + Unpin>(writer: &Arc<Mutex<W>>, msg: &Message) -> anyhow::Result<()> {
+    let data = serde_json::to_vec(msg)?;
+    let len = (data.len() as u32).to_be_bytes();
+    let mut g = writer.lock().await;
+    g.write_all(&len).await?;
+    g.write_all(&data).await?;
+    Ok(())
+}
+
+async fn do_download_w<W: AsyncWrite + Unpin>(w: &Arc<Mutex<W>>, path: &PathBuf, filename: &str) -> anyhow::Result<()> {
+    if !path.is_file() {
+        return send_msg_w(w, &Message::FileError { reason: format!("Nao encontrado: {}", filename) }).await;
+    }
+    let data  = tokio::fs::read(path).await?;
+    let total = data.len() as u64;
+    for chunk in data.chunks(CHUNK_SIZE) {
+        let msg = serde_json::to_vec(&Message::FileChunk { size: chunk.len() as u32 })?;
+        let len = (msg.len() as u32).to_be_bytes();
+        let mut g = w.lock().await;
+        g.write_all(&len).await?;
+        g.write_all(&msg).await?;
+        g.write_all(chunk).await?;
+    }
+    send_msg_w(w, &Message::FileDone { filename: filename.to_string(), bytes: total }).await
+}
+
+async fn do_upload_rw<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    w: &Arc<Mutex<W>>, r: &mut R, dest: &PathBuf, filename: &str, filesize: u64,
+) -> anyhow::Result<()> {
+    let mut data = Vec::with_capacity(filesize as usize);
+    let mut received = 0u64;
+    loop {
+        match recv_msg_r(r).await? {
+            Message::FileChunk { size } => {
+                use tokio::io::AsyncReadExt;
+                let mut chunk = vec![0u8; size as usize];
+                r.read_exact(&mut chunk).await?;
+                data.extend_from_slice(&chunk);
+                received += size as u64;
+            }
+            Message::FileDone { .. } => break,
+            _ => {}
+        }
+    }
+    tokio::fs::write(dest, &data).await?;
+    send_msg_w(w, &Message::FileDone { filename: filename.to_string(), bytes: received }).await
+}
+
+fn apply_offset(ev: crate::protocol::InputEvent, offset: (i32, i32)) -> crate::protocol::InputEvent {
+    use crate::protocol::InputEvent::*;
+    let (ox, oy) = offset;
+    match ev {
+        MouseMove { x, y }         => MouseMove { x: x + ox, y: y + oy },
+        MouseDown { x, y, button } => MouseDown { x: x + ox, y: y + oy, button },
+        MouseUp   { x, y, button } => MouseUp   { x: x + ox, y: y + oy, button },
+        MouseDbl  { x, y }         => MouseDbl  { x: x + ox, y: y + oy },
+        Scroll    { x, y, dy }     => Scroll    { x: x + ox, y: y + oy, dy },
+        other => other,
+    }
 }
 
 fn file_list(folder: &PathBuf) -> Message {
@@ -260,49 +366,4 @@ fn file_list(folder: &PathBuf) -> Message {
     }
     items.sort_by(|a, b| a.name.cmp(&b.name));
     Message::FileListRes { folder: folder.to_string_lossy().to_string(), items }
-}
-
-fn apply_offset(ev: crate::protocol::InputEvent, offset: (i32, i32)) -> crate::protocol::InputEvent {
-    use crate::protocol::InputEvent::*;
-    let (ox, oy) = offset;
-    match ev {
-        MouseMove { x, y }           => MouseMove { x: x + ox, y: y + oy },
-        MouseDown { x, y, button }   => MouseDown { x: x + ox, y: y + oy, button },
-        MouseUp   { x, y, button }   => MouseUp   { x: x + ox, y: y + oy, button },
-        MouseDbl  { x, y }           => MouseDbl  { x: x + ox, y: y + oy },
-        Scroll    { x, y, dy }       => Scroll    { x: x + ox, y: y + oy, dy },
-        other => other,
-    }
-}
-
-async fn do_download(w: &Writer, path: &PathBuf, filename: &str) -> anyhow::Result<()> {
-    if !path.is_file() {
-        return send_msg(w, &Message::FileError { reason: format!("Nao encontrado: {}", filename) }).await;
-    }
-    let data  = tokio::fs::read(path).await?;
-    let total = data.len() as u64;
-    for chunk in data.chunks(CHUNK_SIZE) {
-        send_msg_bytes(w, &Message::FileChunk { size: chunk.len() as u32 }, chunk).await?;
-    }
-    send_msg(w, &Message::FileDone { filename: filename.to_string(), bytes: total }).await
-}
-
-async fn do_upload(
-    w: &Writer, r: &mut Reader, dest: &PathBuf, filename: &str, filesize: u64,
-) -> anyhow::Result<()> {
-    let mut data = Vec::with_capacity(filesize as usize);
-    let mut received = 0u64;
-    loop {
-        match recv_msg(r).await? {
-            Message::FileChunk { size } => {
-                let chunk: Vec<u8> = recv_bytes(r, size as usize).await?;
-                data.extend_from_slice(&chunk);
-                received += size as u64;
-            }
-            Message::FileDone { .. } => break,
-            _ => {}
-        }
-    }
-    tokio::fs::write(dest, &data).await?;
-    send_msg(w, &Message::FileDone { filename: filename.to_string(), bytes: received }).await
 }

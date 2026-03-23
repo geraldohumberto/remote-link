@@ -6,6 +6,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 use futures_util::{SinkExt, StreamExt};
 use tracing::info;
 use crate::protocol::*;
+use crate::tls;
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -62,7 +63,7 @@ pub async fn connect(
             match tcp_relay(&rhost, rport, &relay_id).await {
                 Ok(stream) => {
                     stream.set_nodelay(true).ok();
-                    tcp_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
+                    tls_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
                 }
                 Err(e) => {
                     let _ = evt_tx.send(Evt::Error {
@@ -107,7 +108,37 @@ pub async fn connect(
     };
 
     stream.set_nodelay(true).ok();
-    tcp_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
+    tls_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
+}
+
+// ── Sessão com TLS ────────────────────────────────────────────────────────
+async fn tls_session(
+    stream: TcpStream,
+    password: String,
+    monitor_index: Option<u8>,
+    cmd_rx: mpsc::Receiver<Cmd>,
+    evt_tx: mpsc::Sender<Evt>,
+) {
+    match tls::make_client_tls() {
+        Ok((connector, server_name)) => {
+            match connector.connect(server_name, stream).await {
+                Ok(tls_stream) => {
+                    let (r, w) = tokio::io::split(tls_stream);
+                    session_rw(r, w, password, monitor_index, cmd_rx, evt_tx).await;
+                }
+                Err(e) => {
+                    warn!("TLS falhou, tentando sem criptografia: {}", e);
+                    // fallback sem TLS não é possível pois stream foi consumido
+                    let _ = evt_tx.send(Evt::Error { reason: format!("TLS falhou: {}", e) }).await;
+                }
+            }
+        }
+        Err(e) => {
+            // TLS não disponível — usa plain
+            warn!("TLS não disponível: {} — conectando sem criptografia", e);
+            tcp_session(stream, password, monitor_index, cmd_rx, evt_tx).await;
+        }
+    }
 }
 
 // ── Sessão TCP direta ────────────────────────────────────────────────────
@@ -339,6 +370,133 @@ async fn connect_ws(
     recv_task.abort();
     ws_recv_task.abort();
     ws_send_task.abort();
+}
+
+// ── Sessão genérica para TLS (Read + Write splits) ────────────────────────
+async fn session_rw<R, W>(
+    mut reader: R, writer_raw: W,
+    password: String, monitor_index: Option<u8>,
+    cmd_rx: mpsc::Receiver<Cmd>, evt_tx: mpsc::Sender<Evt>,
+)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let writer: Arc<Mutex<W>> = Arc::new(Mutex::new(writer_raw));
+
+    // Envia Auth
+    let auth = Message::Auth { password, monitor_index };
+    let data = serde_json::to_vec(&auth).unwrap();
+    let len  = (data.len() as u32).to_be_bytes();
+    {
+        let mut g = writer.lock().await;
+        if g.write_all(&len).await.is_err() || g.write_all(&data).await.is_err() { return; }
+    }
+
+    // Recebe AuthOk
+    let mut len_buf = [0u8; 4];
+    if reader.read_exact(&mut len_buf).await.is_err() { return; }
+    let msg_len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; msg_len];
+    if reader.read_exact(&mut buf).await.is_err() { return; }
+    match serde_json::from_slice::<Message>(&buf) {
+        Ok(Message::AuthOk { screen_w, screen_h, platform, monitor_index, .. }) => {
+            let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform, monitor_index }).await;
+        }
+        Ok(Message::AuthFail { reason }) => {
+            let _ = evt_tx.send(Evt::Error { reason: format!("Senha errada: {}", reason) }).await;
+            return;
+        }
+        _ => { let _ = evt_tx.send(Evt::Error { reason: "Protocolo inesperado".into() }).await; return; }
+    }
+
+    // Loop de recebimento e envio igual ao tcp_session
+    let evt_tx2 = evt_tx.clone();
+    let recv_task = tokio::spawn(async move {
+        loop {
+            let mut lb = [0u8; 4];
+            if reader.read_exact(&mut lb).await.is_err() { break; }
+            let ml = u32::from_be_bytes(lb) as usize;
+            let mut mb = vec![0u8; ml];
+            if reader.read_exact(&mut mb).await.is_err() { break; }
+            match serde_json::from_slice::<Message>(&mb) {
+                Ok(Message::FrameDelta { monitor_id, screen_w, screen_h, blocks }) => {
+                    let mut block_data = Vec::new();
+                    for b in &blocks {
+                        let mut jb = vec![0u8; b.size as usize];
+                        if reader.read_exact(&mut jb).await.is_err() { return; }
+                        block_data.push((b.clone(), jb));
+                    }
+                    let _ = evt_tx2.send(Evt::FrameDelta { monitor_id, screen_w, screen_h, blocks: block_data }).await;
+                }
+                Ok(Message::MonitorList { monitors }) => { let _ = evt_tx2.send(Evt::MonitorList { monitors }).await; }
+                Ok(Message::FileListRes { folder, items }) => { let _ = evt_tx2.send(Evt::FileList { folder, items }).await; }
+                Ok(Message::FileDone { filename, bytes }) => { let _ = evt_tx2.send(Evt::FileDone { filename, bytes }).await; }
+                Ok(Message::FileError { reason }) => { let _ = evt_tx2.send(Evt::FileError { reason }).await; }
+                Ok(Message::Clipboard { text }) => { let _ = evt_tx2.send(Evt::Clipboard { text }).await; }
+                Ok(Message::Pong) => {}
+                Ok(Message::Disconnect) | Err(_) => break,
+                _ => {}
+            }
+        }
+        let _ = evt_tx2.send(Evt::Disconnected).await;
+    });
+
+    cmd_loop_w(cmd_rx, writer).await;
+    recv_task.abort();
+}
+
+async fn cmd_loop_w<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
+    mut cmd_rx: mpsc::Receiver<Cmd>,
+    writer: Arc<Mutex<W>>,
+) {
+    use tokio::io::AsyncWriteExt;
+    loop {
+        match cmd_rx.recv().await {
+            Some(cmd) => {
+                let msg = match cmd {
+                    Cmd::Input(ev)              => Message::Input(ev),
+                    Cmd::Clipboard(t)           => Message::Clipboard { text: t },
+                    Cmd::FileList               => Message::FileListReq { folder: None },
+                    Cmd::FileDownload { filename, path } => Message::FileDownload { filename, path },
+                    Cmd::FileUpload { src }     => {
+                        if let Ok(data) = std::fs::read(&src) {
+                            let filename = std::path::Path::new(&src).file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let filesize = data.len() as u64;
+                            let upload_msg = Message::FileUpload { filename: filename.clone(), filesize };
+                            let d = serde_json::to_vec(&upload_msg).unwrap();
+                            let l = (d.len() as u32).to_be_bytes();
+                            let mut g = writer.lock().await;
+                            let _ = g.write_all(&l).await;
+                            let _ = g.write_all(&d).await;
+                            for chunk in data.chunks(CHUNK_SIZE) {
+                                let cm = serde_json::to_vec(&Message::FileChunk { size: chunk.len() as u32 }).unwrap();
+                                let cl = (cm.len() as u32).to_be_bytes();
+                                let _ = g.write_all(&cl).await;
+                                let _ = g.write_all(&cm).await;
+                                let _ = g.write_all(chunk).await;
+                            }
+                            let dm = serde_json::to_vec(&Message::FileDone { filename, bytes: filesize }).unwrap();
+                            let dl = (dm.len() as u32).to_be_bytes();
+                            let _ = g.write_all(&dl).await;
+                            let _ = g.write_all(&dm).await;
+                        }
+                        continue;
+                    }
+                    Cmd::SwitchMonitor { index } => Message::SwitchMonitor { index },
+                    Cmd::Disconnect | _ => { Message::Disconnect }
+                };
+                let d = serde_json::to_vec(&msg).unwrap();
+                let l = (d.len() as u32).to_be_bytes();
+                let mut g = writer.lock().await;
+                if g.write_all(&l).await.is_err() || g.write_all(&d).await.is_err() { break; }
+                if matches!(msg, Message::Disconnect) { break; }
+            }
+            None => break,
+        }
+    }
 }
 
 async fn ws_cmd_loop(mut cmd_rx: mpsc::Receiver<Cmd>, out_tx: mpsc::Sender<Vec<u8>>) {

@@ -1,6 +1,6 @@
 [package]
 name        = "remote-link"
-version     = "0.1.6"
+version     = "0.1.8"
 edition     = "2021"
 description = "Acesso remoto peer-to-peer"
 
@@ -26,6 +26,10 @@ tracing             = "0.1"
 tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite   = { version = "0.21", features = ["native-tls"] }
 futures-util        = "0.3"
+tokio-rustls        = "0.26"
+rustls              = { version = "0.23", features = ["ring"] }
+rcgen               = "0.13"
+rustls-pemfile      = "2"
 
 [profile.release]
 opt-level     = 3

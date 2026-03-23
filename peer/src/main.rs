@@ -7,6 +7,7 @@ mod icon;
 mod input;
 mod protocol;
 mod server;
+mod tls;
 
 use std::sync::Arc;
 use eframe::egui;
