@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 use futures_util::{SinkExt, StreamExt};
-use tracing::info;
+use tracing::{info, warn};
 use crate::protocol::*;
 use crate::tls;
 
@@ -486,7 +486,7 @@ async fn cmd_loop_w<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
                         continue;
                     }
                     Cmd::SwitchMonitor { index } => Message::SwitchMonitor { index },
-                    Cmd::Disconnect | _ => { Message::Disconnect }
+                    Cmd::Disconnect => { Message::Disconnect }
                 };
                 let d = serde_json::to_vec(&msg).unwrap();
                 let l = (d.len() as u32).to_be_bytes();
