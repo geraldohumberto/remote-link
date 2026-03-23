@@ -73,6 +73,7 @@ impl Capturer {
         if let Some(prev) = &self.prev_frame {
             let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
             for row in 0..rows {
                 for col in 0..cols {
                     let bx = col * BLOCK_SIZE;
@@ -88,9 +89,22 @@ impl Capturer {
                 }
             }
         } else {
-            let jpeg = jpeg_encode(&current, quality)?;
-            let size = jpeg.len() as u32;
-            changed_blocks.push((BlockInfo { x: 0, y: 0, w: tw, h: th, size }, jpeg));
+            // Primeiro frame — envia em blocos pequenos igual ao delta
+            // Evita travar o canal com um frame gigante na conexão inicial
+            let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            for row in 0..rows {
+                for col in 0..cols {
+                    let bx = col * BLOCK_SIZE;
+                    let by = row * BLOCK_SIZE;
+                    let bw = BLOCK_SIZE.min(tw - bx);
+                    let bh = BLOCK_SIZE.min(th - by);
+                    let block_img = crop_block(&current, bx, by, bw, bh);
+                    let jpeg = jpeg_encode(&block_img, quality)?;
+                    let size = jpeg.len() as u32;
+                    changed_blocks.push((BlockInfo { x: bx, y: by, w: bw, h: bh, size }, jpeg));
+                }
+            }
         }
         self.prev_frame = Some(current);
         if changed_blocks.is_empty() { Ok(None) } else { Ok(Some((tw, th, changed_blocks))) }
