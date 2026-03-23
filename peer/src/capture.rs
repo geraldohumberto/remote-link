@@ -70,10 +70,14 @@ impl Capturer {
         };
         let current = to_rgb(&frame, tw, th);
         let mut changed_blocks: Vec<(BlockInfo, Vec<u8>)> = Vec::new();
-        if let Some(prev) = &self.prev_frame {
-            let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+        let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let total_blocks = (cols * rows) as usize;
+
+        if let Some(prev) = &self.prev_frame {
+            // Primeiro passa: identifica blocos mudados
+            let mut dirty: Vec<(u32,u32,u32,u32)> = Vec::new();
             for row in 0..rows {
                 for col in 0..cols {
                     let bx = col * BLOCK_SIZE;
@@ -81,18 +85,37 @@ impl Capturer {
                     let bw = BLOCK_SIZE.min(tw - bx);
                     let bh = BLOCK_SIZE.min(th - by);
                     if block_changed(prev, &current, bx, by, bw, bh) {
-                        let block_img = crop_block(&current, bx, by, bw, bh);
-                        let jpeg = jpeg_encode(&block_img, quality)?;
-                        let size = jpeg.len() as u32;
-                        changed_blocks.push((BlockInfo { x: bx, y: by, w: bw, h: bh, size }, jpeg));
+                        dirty.push((bx, by, bw, bh));
                     }
                 }
             }
+
+            if dirty.is_empty() {
+                self.prev_frame = Some(current);
+                return Ok(None);
+            }
+
+            // Qualidade adaptativa baseada em % de blocos mudados:
+            // >40% = movimento intenso (arrastar janela) → quality 30
+            // 10-40% = movimento moderado → quality 55
+            // <10% = calmaria (digitar texto) → quality alta configurada
+            let dirty_ratio = dirty.len() as f32 / total_blocks as f32;
+            let adaptive_quality = if dirty_ratio > 0.40 {
+                30
+            } else if dirty_ratio > 0.10 {
+                55
+            } else {
+                quality.max(65)
+            };
+
+            for (bx, by, bw, bh) in dirty {
+                let block_img = crop_block(&current, bx, by, bw, bh);
+                let jpeg = jpeg_encode(&block_img, adaptive_quality)?;
+                let size = jpeg.len() as u32;
+                changed_blocks.push((BlockInfo { x: bx, y: by, w: bw, h: bh, size }, jpeg));
+            }
         } else {
-            // Primeiro frame — envia em blocos pequenos igual ao delta
-            // Evita travar o canal com um frame gigante na conexão inicial
-            let cols = (tw + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            let rows = (th + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            // Primeiro frame — blocos com quality moderada para não travar conexão
             for row in 0..rows {
                 for col in 0..cols {
                     let bx = col * BLOCK_SIZE;
@@ -100,12 +123,13 @@ impl Capturer {
                     let bw = BLOCK_SIZE.min(tw - bx);
                     let bh = BLOCK_SIZE.min(th - by);
                     let block_img = crop_block(&current, bx, by, bw, bh);
-                    let jpeg = jpeg_encode(&block_img, quality)?;
+                    let jpeg = jpeg_encode(&block_img, 55)?;
                     let size = jpeg.len() as u32;
                     changed_blocks.push((BlockInfo { x: bx, y: by, w: bw, h: bh, size }, jpeg));
                 }
             }
         }
+
         self.prev_frame = Some(current);
         if changed_blocks.is_empty() { Ok(None) } else { Ok(Some((tw, th, changed_blocks))) }
     }
