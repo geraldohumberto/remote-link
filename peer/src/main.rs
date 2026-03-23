@@ -138,9 +138,10 @@ impl App {
         for evt in events {
             match evt {
                 Evt::MonitorList { monitors } => { self.monitors = monitors; }
-                Evt::Connected { screen_w, screen_h, platform } => {
+                Evt::Connected { screen_w, screen_h, platform, monitor_index } => {
                     self.server_w = screen_w; self.server_h = screen_h;
                     self.peer_platform = platform;
+                    self.active_monitor = monitor_index;
                     self.screen = Screen::Remote;
                     self.conn_error = String::new(); self.connecting = false;
                 }
@@ -278,10 +279,7 @@ impl App {
     }
 
     fn do_connect_monitor(&mut self, monitor_index: Option<u8>) {
-        let remote_id = match monitor_index {
-            None    => self.config.remote_id.trim().to_string(),
-            Some(i) => format!("{}-{}", self.config.remote_id.trim(), i),
-        };
+        let remote_id = self.config.remote_id.trim().to_string();
         let pass = if self.pass_buf.is_empty() { self.config.password.clone() } else { self.pass_buf.clone() };
         let relay = if self.config.use_relay && !self.config.relay_host.trim().is_empty() {
             Some((self.config.relay_host.trim().to_string(), self.config.relay_port))
@@ -550,15 +548,12 @@ impl App {
                                 self.server_h = m.height;
                             }
                         }
-                        // Botão monitor+ — sempre spawna novo processo independente
                         if ui.add(egui::Button::new(RichText::new("🖥+").color(Color32::GRAY).size(11.0))).clicked() {
-                            let next_mon = self.next_monitor_for_secondary();
                             let exe = std::env::current_exe().unwrap_or_default();
                             let remote_id = self.config.remote_id.trim().to_string();
                             let pass = self.pass_buf.clone();
                             let _ = std::process::Command::new(&exe)
                                 .arg("--connect").arg(&remote_id)
-                                .arg("--monitor").arg(next_mon.to_string())
                                 .arg("--password").arg(&pass)
                                 .spawn();
                         }

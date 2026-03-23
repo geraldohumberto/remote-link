@@ -14,13 +14,8 @@ use crate::protocol::*;
 
 pub async fn run(config: Arc<Config>) {
     if let Some((relay_host, relay_port)) = config.relay() {
-        let monitors = crate::capture::Capturer::list_monitors();
-        for mon in monitors {
-            let cfg = config.clone();
-            let rh = relay_host.clone();
-            let idx = if mon.index == 0 { None } else { Some(mon.index) };
-            tokio::spawn(relay_register_loop(rh, relay_port, cfg, idx));
-        }
+        let cfg = config.clone();
+        tokio::spawn(relay_register_loop(relay_host, relay_port, cfg, None));
     }
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -44,16 +39,13 @@ pub async fn run(config: Arc<Config>) {
 }
 
 async fn relay_register_loop(relay_host: String, relay_port: u16, config: Arc<Config>, monitor_index: Option<u8>) {
-    let my_id = match monitor_index {
-        None    => config.machine_id.clone(),
-        Some(i) => format!("{}-{}", config.machine_id, i),
-    };
+    let my_id = config.machine_id.clone();
     info!("Relay register loop — ID: {}", my_id);
     loop {
         match relay_register_once(&relay_host, relay_port, &my_id, config.clone(), monitor_index).await {
             Ok(()) => {
-                info!("Sessao relay encerrada, re-registrando em 3s...");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                info!("Sessao relay encerrada, re-registrando em 500ms...");
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
                 warn!("Relay falhou: {} — tentando em 30s", e);
@@ -88,6 +80,29 @@ async fn relay_register_once(
     if notif["id"].as_str() == Some("peer_connected") {
         info!("Peer conectou via relay — iniciando sessao");
         let stream = buf.into_inner().reunite(writer)?;
+        
+        // Re-registra imediatamente em background para manter ID sempre disponível
+        let rh2 = relay_host.to_string();
+        let rp2 = relay_port;
+        let id2 = my_id.to_string();
+        let cfg2 = config.clone();
+        let mon2 = monitor_index;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            loop {
+                match relay_register_once(&rh2, rp2, &id2, cfg2.clone(), mon2).await {
+                    Ok(()) => {
+                        info!("Sessao relay encerrada, re-registrando...");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    Err(e) => {
+                        warn!("Relay falhou: {} — tentando em 5s", e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+        
         handle(stream, config, monitor_index).await?;
     } else {
         warn!("Notificacao inesperada do relay: {}", line.trim());
@@ -112,6 +127,7 @@ async fn handle(stream: TcpStream, config: Arc<Config>, forced_monitor: Option<u
                 screen_w: sw, screen_h: sh,
                 platform: std::env::consts::OS.to_string(),
                 peer_id:  Uuid::new_v4().to_string(),
+                monitor_index: forced_monitor.or(monitor_index).unwrap_or(0),
             }).await?;
             let monitors = Capturer::list_monitors();
             send_msg(&writer, &Message::MonitorList { monitors }).await?;
