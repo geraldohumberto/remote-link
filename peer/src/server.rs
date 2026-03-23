@@ -87,20 +87,23 @@ async fn relay_register_once(
         let id2 = my_id.to_string();
         let cfg2 = config.clone();
         let mon2 = monitor_index;
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            loop {
-                match relay_register_once(&rh2, rp2, &id2, cfg2.clone(), mon2).await {
-                    Ok(()) => {
-                        info!("Sessao relay encerrada, re-registrando...");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                    }
-                    Err(e) => {
-                        warn!("Relay falhou: {} — tentando em 5s", e);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+        let rt = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            rt.block_on(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                loop {
+                    match relay_register_once(&rh2, rp2, &id2, cfg2.clone(), mon2).await {
+                        Ok(()) => {
+                            info!("Sessao relay encerrada, re-registrando...");
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                        Err(e) => {
+                            warn!("Relay falhou: {} — tentando em 5s", e);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
                     }
                 }
-            }
+            });
         });
         
         handle(stream, config, monitor_index).await?;

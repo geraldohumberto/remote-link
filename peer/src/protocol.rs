@@ -30,7 +30,7 @@ pub struct MonitorInfo {
 #[serde(tag = "type", content = "data")]
 pub enum Message {
     Auth        { password: String, monitor_index: Option<u8> },
-    AuthOk      { screen_w: u32, screen_h: u32, platform: String, peer_id: String },
+    AuthOk      { screen_w: u32, screen_h: u32, platform: String, peer_id: String, monitor_index: u8 },
     AuthFail    { reason: String },
     FrameInfo   { width: u32, height: u32, size: u32 },
     // Delta: envia só os blocos que mudaram

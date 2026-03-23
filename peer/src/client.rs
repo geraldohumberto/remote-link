@@ -20,7 +20,7 @@ pub enum Cmd {
 
 #[derive(Debug, Clone)]
 pub enum Evt {
-    Connected   { screen_w: u32, screen_h: u32, platform: String },
+    Connected   { screen_w: u32, screen_h: u32, platform: String, monitor_index: u8 },
     Frame       { jpeg: Vec<u8> },
     FrameDelta  { monitor_id: u8, screen_w: u32, screen_h: u32, blocks: Vec<(crate::protocol::BlockInfo, Vec<u8>)> },
     MonitorList { monitors: Vec<crate::protocol::MonitorInfo> },
@@ -124,8 +124,8 @@ async fn tcp_session(
     if send_msg(&writer, &Message::Auth { password, monitor_index }).await.is_err() { return; }
 
     match recv_msg(&mut reader).await {
-        Ok(Message::AuthOk { screen_w, screen_h, platform, .. }) => {
-            let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform }).await;
+        Ok(Message::AuthOk { screen_w, screen_h, platform, monitor_index, .. }) => {
+            let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform, monitor_index }).await;
         }
         Ok(Message::AuthFail { reason }) => {
             let _ = evt_tx.send(Evt::Error { reason: format!("Senha errada: {}", reason) }).await;
@@ -288,8 +288,8 @@ async fn connect_ws(
         std::time::Duration::from_secs(10),
         proto_decode_from_channel(&mut in_rx),
     ).await {
-        Ok(Ok(Message::AuthOk { screen_w, screen_h, platform, .. })) => {
-            let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform }).await;
+        Ok(Ok(Message::AuthOk { screen_w, screen_h, platform, monitor_index, .. })) => {
+            let _ = evt_tx.send(Evt::Connected { screen_w, screen_h, platform, monitor_index }).await;
         }
         Ok(Ok(Message::AuthFail { reason })) => {
             let _ = evt_tx.send(Evt::Error { reason: format!("Senha errada: {}", reason) }).await;
